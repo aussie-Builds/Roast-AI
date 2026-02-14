@@ -41,9 +41,10 @@ const INTENSITY_CONFIG = {
     maxSentences: 1,
     maxTokens: 40,
     candidates: 8,
-    temperature: 0.9,
-    presence_penalty: 0.5,
-    frequency_penalty: 0.3,
+    temperature: 1.0,
+    top_p: 0.9,
+    presence_penalty: 0.6,
+    frequency_penalty: 0.5,
     style: 'one sharp stab — quick, visual, brutal',
     format: 'ONE sentence, 8–16 words, ends on a punch word; no list',
   },
@@ -103,7 +104,7 @@ const SAVAGE_BANNED_PHRASES = [
   "i've seen brighter", 'that face just called', 'with that lighting',
   'you look like', 'one bad audition', 'sleep-deprived extra',
   // scene/horror framing
-  'dimly lit shed', 'warehouse', 'garage', 'interrogated', 'interrogation',
+  'dimly lit shed', 'warehouse', 'interrogated', 'interrogation',
   // advice framing
   "it's time to", 'time to', 'you should', 'you need to',
   'do better', 'fix that', 'upgrade both', 'try again', 'start over',
@@ -113,11 +114,49 @@ const SAVAGE_BANNED_PHRASES = [
   // additional AI template openers
   'your expression', 'your vibe', "it's giving", 'energy of',
   'giving me', 'major', 'the aesthetic',
+  // friendly filler
+  'my friend', 'pal', 'buddy', 'champ', 'genius',
+  // repeating templates
+  'your enthusiasm', 'your motivation', "can't light up your",
+  'brighter than your enthusiasm', 'update failures',
+  'that expression', 'that face says',
 ];
 
 const SAVAGE_BANNED_WORDS = [
   'alive', 'lifeless', 'hollow', 'void', 'desperate', 'lonely',
   'dead-eyed', 'soulless', 'empty',
+];
+
+const SAVAGE_BANNED_WORTHLESSNESS = [
+  'not worth', "you're not worth", 'you are not worth', 'worthless',
+  'no value', 'value-less', 'no one cares', 'nobody cares',
+  'irrelevant', 'unmissed', 'forgotten',
+];
+
+const SAVAGE_EXISTENTIAL_BANS = [
+  'about life', 'life', 'hope', 'gave up hope', 'gave up', 'no hope',
+  'regrets this decision', 'regret', 'meaning', 'existence', 'existential',
+  'purpose', 'soul', 'soulless', 'dead inside', 'worth', 'worthless',
+];
+
+const SAVAGE_YOU_ANCHORS = [
+  'face', 'eyes', 'smile', 'stare', 'posture', 'pose', 'hair', 'outfit',
+  'shirt', 'hoodie', 'jacket', 'glasses', 'mouth', 'chin', 'jaw', 'stance',
+];
+
+const SAVAGE_ENV_OPENERS = [
+  'that wall', 'that room', 'that garage', 'that setup', 'that background',
+  'even your garage', 'even your room', 'even your setup', 'even this room',
+  'your garage', 'your room', 'your setup', 'the wall', 'the room', 'the garage',
+];
+
+// Ego/effort signal: savage candidates must contain at least one
+const SAVAGE_EGO_TOKENS = [
+  'effort', 'trying', 'try-hard', 'tryhard', 'trying too hard',
+  'rehears', 'overconfident', 'confident', 'confidence',
+  'pretend', 'posing', 'forced', 'audition', 'perform', 'cosplay',
+  'delusion', 'cope', 'ego', 'validation', 'attention',
+  'overcompensat', 'overcompens',
 ];
 
 // Overused tokens: not hard-banned but heavily penalized in scoring
@@ -132,6 +171,9 @@ const SAVAGE_PUNCH_ENDINGS = [
   'rough', 'brutal', 'painful', 'mid', 'unforgivable', 'criminal',
   'audacity', 'offensive', 'insulting', 'bleak', 'haunting',
   'disappointed', 'wrong', 'worse', 'bold', 'coward', 'fraud',
+  // verdict / ego-exposure closers
+  'delusion', 'tryhard', 'awkward', 'budget', 'discount', 'expired',
+  'unfinished', 'unconvincing', 'secondhand',
 ];
 
 const FALLBACKS = {
@@ -152,9 +194,16 @@ const FALLBACKS = {
     "Your vibe is buffering.",
   ],
   savage: [
-    "That pose took you nine tries and this was the best one.",
     "You dress like you lost a bet and just kept going.",
     "That smile is doing community service for the rest of your face.",
+    "Confidence like yours should require a permit.",
+    "You peaked and somehow kept going downhill.",
+    "That effort was generous, the result was not.",
+    "Bold of you to post this without a filter.",
+    "You rehearsed this and it still flopped.",
+    "Everything about this screams overcompensation.",
+    "You confused confidence with delusion again.",
+    "That stance says main character but the results say background.",
   ],
   nuclear: [
     "Your expression is rehearsed but your eyes forgot the script. Nobody taught you how to be genuine.",
@@ -181,6 +230,12 @@ function tokenOverlap(a, b) {
   return shared / Math.min(setA.size, setB.size);
 }
 
+function pushRecentSavage(text) {
+  if (!text) return;
+  recentSavageRoasts.push(text.toLowerCase());
+  while (recentSavageRoasts.length > MAX_RECENT_SAVAGE) recentSavageRoasts.shift();
+}
+
 function buildPrompt(config, tierName, avoidThemes) {
   let tierRules = '';
   if (tierName === 'medium') {
@@ -192,23 +247,15 @@ MEDIUM RULES:
 - End on the joke.`;
   } else if (tierName === 'savage') {
     tierRules = `
-SAVAGE RULES (STRICT):
-- Exactly ONE sentence. No second sentence. No follow-ups. No explanations.
-- 8–16 words total. Not shorter. Not longer.
-- Reference ONE visible detail (hair, outfit, expression, lighting, pose, background, clothing).
-- End on a punch word — the last word must sting. Not neutral, not trailing off.
-- Use "you" or "your". Attack the person, not the scene.
-- No "you look like". No "it's like". No "screams". No "with that".
-- No storytelling. No metaphors. No similes. No scene-setting.
-- No imperatives or advice (no "upgrade", "fix", "try", "stop", "start", "learn", "get", "go").
-- No questions. No emojis. No encouragement.
-- Quick stab. Clean cut. Walk away.
-- The LAST WORD should land hard. Prefer punch words like: pathetic, tragic, embarrassing, cringe, weak, painful, mid, criminal, disappointing, worse.
-- Avoid ending on neutral words (the, it, is, that, with).
-- Avoid overusing: expression, personality, lighting, energy, vibe, aura, presence, effort — these are GPT crutches.
-- Good examples: "Even your PC looks disappointed.", "That lighting did you zero favors.", "Confidence didn't load with the rest of you.", "Your mirror deserves hazard pay."
-- NEVER use: ${SAVAGE_BANNED_PHRASES.join(', ')}
-- NEVER use these words: ${SAVAGE_BANNED_WORDS.join(', ')}`;
+Savage tier rules:
+- Write ONE sharp verdict sentence.
+- 8 to 14 words.
+- No storytelling.
+- No comparisons between clothing and person.
+- No "that pose", "your hoodie", or object effort comparisons.
+- Focus on confidence, ego, or overcompensation.
+- Tone: blunt, dismissive, final.
+- Do not explain. Do not elaborate.`;
   } else if (tierName === 'nuclear') {
     tierRules = `
 NUCLEAR RULES (STRICT — must be significantly harsher than Savage):
@@ -367,6 +414,10 @@ const VISUAL_KEYWORDS = [
   'outfit', 'shirt', 'face', 'look', 'jaw', 'glasses', 'hat', 'hoodie',
   'posture', 'arms', 'hands', 'standing', 'sitting', 'leaning', 'staring',
   'grin', 'smirk', 'frown', 'squint', 'selfie', 'angle', 'shadow',
+  'pc', 'computer', 'setup', 'monitor', 'screen', 'keyboard', 'desk',
+  'rgb', 'led', 'camera', 'phone', 'headphones',
+  'car', 'hood', 'bonnet', 'engine', 'tire', 'tyre', 'wheel', 'wrench',
+  'tools', 'oil', 'workshop', 'toolbox', 'jack', 'garage',
 ];
 
 function validateRoast(text, tierName) {
@@ -418,6 +469,38 @@ function validateRoast(text, tierName) {
         reasons.push(`savage-imperative:${fw}`);
         break;
       }
+    }
+    // Ban template: "your * is the only thing"
+    if (lower.includes('is the only thing')) reasons.push('savage-template:is-the-only-thing');
+    // Ban template: "so * it looks like"
+    if (/\bso\b.+\bit looks like\b/.test(lower)) reasons.push('savage-template:so-it-looks-like');
+    // Reject worthlessness/value-erasure phrases
+    for (const wp of SAVAGE_BANNED_WORTHLESSNESS) {
+      const re = new RegExp(`\\b${wp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`savage-banned-worthlessness:${wp}`); break; }
+    }
+    // Reject anchor-pattern openers
+    const savageOpenerBans = ['that pose', 'your hoodie', 'your jacket', 'that hoodie', 'that jacket'];
+    for (const ob of savageOpenerBans) {
+      if (lower.startsWith(ob)) { reasons.push(`savage-banned-opener:${ob}`); break; }
+    }
+    // Reject invented counts
+    if (/\d/.test(text)) reasons.push('savage-contains-digit');
+    if (/\b(one|two|three|four|five|six|seven|eight|nine|ten|once|twice|thrice|times|couple|few|several)\b/i.test(text)) reasons.push('savage-count-word');
+    // Reject retry/attempt language
+    if (/\b(tries|attempts|retake|again|took you)\b/i.test(text) || lower.includes('another take')) reasons.push('savage-retry-language');
+    // Reject "screaming" word forms
+    if (/\bscream(s|ing|ed)?\b/i.test(text)) reasons.push('savage-banned-scream');
+    // Reject existential/bleak phrasing
+    for (const term of SAVAGE_EXISTENTIAL_BANS) {
+      const re = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`savage-existential:${term}`); break; }
+    }
+    // Require at least one YOU-anchor (person-focused detail)
+    if (!SAVAGE_YOU_ANCHORS.some(a => lower.includes(a))) reasons.push('savage-no-you-anchor');
+    // Reject environment-subject openers
+    for (const opener of SAVAGE_ENV_OPENERS) {
+      if (lower.startsWith(opener)) { reasons.push(`savage-env-opener:${opener}`); break; }
     }
   }
 
@@ -507,9 +590,11 @@ function scoreRoast(text, tierName) {
     const words = text.trim().split(/\s+/);
     const wordCount = words.length;
     const sentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+    const firstWord = words[0]?.toLowerCase().replace(/[^a-z]/g, '') || '';
 
-    // Reward: sweet spot 8–16 words
-    if (wordCount >= 8 && wordCount <= 16) score += 25;
+    // Word count sweet spot (shifted tighter)
+    if (wordCount >= 8 && wordCount <= 12) score += 20;
+    else if (wordCount >= 13 && wordCount <= 16) score += 10;
     // Penalize: outside range
     if (wordCount > 16) score -= 40;
     if (wordCount < 8) score -= 20;
@@ -531,12 +616,68 @@ function scoreRoast(text, tierName) {
     if (savageVisualHits >= 1) score += 10;
     if (savageVisualHits === 0) score -= 10;
 
-    // Reward: last word is a punch ending word (+20)
+    // --- Punch ending scoring ---
     const lastWord = words[words.length - 1]?.toLowerCase().replace(/[^a-z]/g, '') || '';
     if (SAVAGE_PUNCH_ENDINGS.includes(lastWord)) score += 20;
-    // Penalize: last word is neutral/filler (articles, prepositions, pronouns)
+    // Penalize: last word is neutral/filler
     const neutralEndings = ['the', 'a', 'an', 'it', 'is', 'was', 'and', 'but', 'or', 'of', 'to', 'in', 'on', 'for', 'that', 'this', 'with'];
     if (neutralEndings.includes(lastWord)) score -= 15;
+    // Penalize: repeated punch ending across recent savage outputs
+    if (lastWord) {
+      let endingRepeats = 0;
+      for (const prev of recentSavageRoasts) {
+        const prevWords = prev.replace(/[^a-z\s]/g, '').trim().split(/\s+/);
+        if (prevWords[prevWords.length - 1] === lastWord) endingRepeats++;
+      }
+      if (endingRepeats >= 2) score -= 40;
+      else if (endingRepeats === 1) score -= 20;
+    }
+
+    // Penalize: "tragic" ending dominance
+    if (lastWord === 'tragic') score -= 20;
+    // Penalize: overused fallback phrase
+    if (lower.includes('nine tries')) score -= 40;
+    // Penalize: "lighting" with no ego tokens (extra protection)
+    if (lower.includes('lighting') && !SAVAGE_EGO_TOKENS.some(t => lower.includes(t))) score -= 20;
+
+    // --- Non-template opener scoring ---
+    if (firstWord === 'your') score -= 20;
+    else score += 15;
+
+    // --- Environmental fallback penalty (lighting/backdrop without ego content) ---
+    const envWords = ['lighting', 'background', 'backdrop', 'angle', 'shadow', 'room'];
+    const egoContent = ['confidence', 'confident', 'attempt', 'trying', 'overconfident', 'rehearsed', 'performing', 'pretending', 'pose', 'effort', 'delusion', 'audacity'];
+    if (envWords.some(w => lower.includes(w)) && !egoContent.some(w => lower.includes(w))) score -= 20;
+
+    // --- Template pattern penalties ---
+    // "so X it looks like Y"
+    if (/\bso\b/.test(lower) && lower.includes('it looks like')) score -= 20;
+    // "your * is the only thing"
+    if (lower.includes('is the only thing')) score -= 25;
+    // "your * is doing"
+    if (/your\s+\w+\s+is\s+doing/.test(lower)) score -= 20;
+
+    // --- Verdict / ego-exposure vocabulary bonus (capped +10) ---
+    const verdictWords = ['confident', 'confidence', 'audition', 'rehearsed', 'try-hard', 'tryhard',
+      'overcompensat', 'perform', 'performing', 'posed', 'forced', 'delusion', 'audacity',
+      'staged', 'pretending', 'wannabe', 'practice', 'attempt'];
+    const hasVerdict = verdictWords.some(v => lower.includes(v));
+    if (hasVerdict) score += 10;
+
+    // --- Verdict phrase bonuses (+10 each, capped +20) ---
+    const verdictPhrases = ['sold separately', 'that angle lied', 'you rehearsed', 'still lost',
+      'trying too hard', 'overcompensat', 'and it shows'];
+    let verdictPhraseHits = 0;
+    for (const vp of verdictPhrases) {
+      if (lower.includes(vp)) verdictPhraseHits++;
+    }
+    score += Math.min(verdictPhraseHits * 10, 20);
+    // Anti-template: penalize if 2+ verdict phrases crammed into one line
+    if (verdictPhraseHits >= 2) score -= 10;
+
+    // Soft ego signal: reward if present, penalize if absent
+    if (SAVAGE_EGO_TOKENS.some(t => lower.includes(t))) score += 10;
+    else score -= 20;
 
     // Penalize: overused AI tokens (-10 each, capped -30)
     let overusedPenalty = 0;
@@ -555,15 +696,68 @@ function scoreRoast(text, tierName) {
       if (re.test(text)) score -= 15;
     }
     // Penalize: imperative openers
-    const fw = sentences[0]?.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '');
-    if (SAVAGE_IMPERATIVES.includes(fw)) score -= 30;
+    if (SAVAGE_IMPERATIVES.includes(firstWord)) score -= 30;
     // Penalize: questions
     if (text.includes('?')) score -= 15;
+
+    // Penalize: 2+ environment-narration words without directness
+    const envNarration = ['lighting', 'dark', 'dreary', 'room', 'setup', 'background', 'shadow'];
+    const envNarrationHits = envNarration.filter(w => lower.includes(w)).length;
+    if (envNarrationHits >= 2) score -= 20;
+
+    // Penalize: no direct address at all
+    if (!/\byou(r|'re|'ve|'ll)?\b/.test(lower)) score -= 30;
+
+    // Penalize: overused environment framing
+    if (lower.includes('even your computer') || lower.includes('even the lighting')) score -= 15;
+
+    // Penalize: environment-subject opener (-60)
+    if (SAVAGE_ENV_OPENERS.some(op => lower.startsWith(op))) score -= 60;
+
+    // Penalize: existential "life" or "hope" (-80)
+    if (/\blife\b/i.test(text) || /\bhope\b/i.test(text)) score -= 80;
+
+    // Reward: mild environment token as supporting detail, not opener (+5, cap +5)
+    const envSupportTokens = ['lighting', 'room', 'background', 'setup', 'garage', 'wall', 'shed'];
+    const hasEnvSupport = envSupportTokens.some(t => lower.includes(t));
+    const startsWithEnvOpener = SAVAGE_ENV_OPENERS.some(op => lower.startsWith(op));
+    if (hasEnvSupport && !startsWithEnvOpener) score += 5;
+
+    // Penalize: enthusiasm/lighting/RGB template tokens (-10 each, capped -30)
+    const enthusTokens = ['enthusiasm', 'motivation', 'rgb', 'led', 'glow', 'lighting'];
+    let enthusPenalty = 0;
+    for (const et of enthusTokens) {
+      if (lower.includes(et)) enthusPenalty += 10;
+    }
+    score -= Math.min(enthusPenalty, 30);
+
+    // Penalize: friendly filler (-40)
+    const friendlyFiller = ['pal', 'my friend', 'buddy', 'champ', 'genius'];
+    if (friendlyFiller.some(f => lower.includes(f))) score -= 40;
+
+    // Penalize: brightness comparison patterns (-35)
+    if (/brighter than your/i.test(text) || /can't light up your/i.test(text) || /more lit than your/i.test(text)) score -= 35;
+
+    // Reward: ego humiliation words (+10, capped +10)
+    const egoHumWords = ['delusional', 'overcompensating', 'desperate', 'insecure', 'fraudulent', 'pretending', 'performing', 'coping'];
+    if (egoHumWords.some(w => lower.includes(w))) score += 10;
+
+    // Reward: novel punch ending — not in last 3 endings used (+15)
+    if (SAVAGE_PUNCH_ENDINGS.includes(lastWord)) {
+      const recentEndings = recentSavageRoasts.slice(-3).map(r => {
+        const rw = r.replace(/[^a-z\s]/g, '').trim().split(/\s+/);
+        return rw[rw.length - 1] || '';
+      });
+      if (!recentEndings.includes(lastWord)) score += 15;
+    }
 
     // Penalize: too similar to recent savage outputs (-30 if >50% token overlap)
     for (const prev of recentSavageRoasts) {
       if (tokenOverlap(text, prev) > 0.5) { score -= 30; break; }
     }
+
+    // Tie-breaker: small deterministic variation to stabilize sorting
+    score -= text.length % 7;
   }
 
   // --- Nuclear-specific scoring ---
@@ -799,8 +993,12 @@ app.post('/api/roast', async (req, res) => {
     const prompt = buildPrompt(config, tierName, avoidThemes);
     const isHighTier = tierName === 'savage' || tierName === 'nuclear';
 
+    const savageAvoidBlock = tierName === 'savage' && recentSavageRoasts.length > 0
+      ? `\n\nDO NOT REPEAT OR PARAPHRASE ANY OF THESE:\n${recentSavageRoasts.slice(-25).map(r => `- ${r}`).join('\n')}`
+      : '';
+
     const systemMsg = tierName === 'savage'
-      ? `You are a roast comedian. ONE sentence. 8–16 words. Reference something visible. End on a punch word. Respond with ONLY valid JSON. No markdown. No code fences.`
+      ? `You are a roast comedian. ONE sentence. 8–16 words. Reference something visible. End on a punch word. Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
       : tierName === 'nuclear'
         ? `You are a ruthless roast comedian. Respond with ONLY valid JSON. No markdown. No code fences. No explanations. 3–4 sentences, escalating intensity, short knockout closer. Cold and cutting.`
         : `You are a sharp, observational roast comedian. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanations.`;
@@ -823,6 +1021,7 @@ app.post('/api/roast', async (req, res) => {
       if (config.temperature != null) opts.temperature = config.temperature;
       if (config.presence_penalty != null) opts.presence_penalty = config.presence_penalty;
       if (config.frequency_penalty != null) opts.frequency_penalty = config.frequency_penalty;
+      if (config.top_p != null) opts.top_p = config.top_p;
       return opts;
     };
 
@@ -834,6 +1033,7 @@ app.post('/api/roast', async (req, res) => {
     if (isHighTier) {
       // --- Multi-sample generation for savage/nuclear ---
       const numCandidates = config.candidates || 4;
+      const savageRejectCounts = {};
 
       const generateCandidates = async (sysContent) => {
         const calls = Array.from({ length: numCandidates }, () =>
@@ -856,6 +1056,11 @@ app.post('/api/roast', async (req, res) => {
             const v = validateRoast(clamped, tierName);
             if (!v.valid) {
               if (isDev) console.log(`[roast] candidate rejected: ${v.reasons.join(', ')} — "${clamped.slice(0, 60)}…"`);
+              if (tierName === 'savage') {
+                for (const reason of v.reasons.slice(0, 2)) {
+                  savageRejectCounts[reason] = (savageRejectCounts[reason] || 0) + 1;
+                }
+              }
               continue;
             }
             const score = scoreRoast(clamped, tierName);
@@ -887,16 +1092,50 @@ app.post('/api/roast', async (req, res) => {
         candidates = candidates.concat(round2);
       }
 
+      // --- Savage intra-batch repetition penalty ---
+      if (tierName === 'savage' && candidates.length > 1) {
+        const prefixes = candidates.map(c => {
+          const w = c.text.toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/);
+          return { w2: w.slice(0, 2).join(' '), w3: w.slice(0, 3).join(' '), w4: w.slice(0, 4).join(' ') };
+        });
+        for (let i = 0; i < candidates.length; i++) {
+          for (let j = i + 1; j < candidates.length; j++) {
+            if (prefixes[i].w4 === prefixes[j].w4) {
+              candidates[i].score -= 30;
+              candidates[j].score -= 30;
+            } else if (prefixes[i].w3 === prefixes[j].w3) {
+              candidates[i].score -= 20;
+              candidates[j].score -= 20;
+            } else if (prefixes[i].w2 === prefixes[j].w2) {
+              candidates[i].score -= 10;
+              candidates[j].score -= 10;
+            }
+          }
+        }
+      }
+
+      // --- Savage round 3: last-ditch retry before fallback ---
+      if (tierName === 'savage' && candidates.length === 0) {
+        if (isDev) console.log(`[savage] round1+2 empty, triggering round3 rewrite`);
+        const rewriteSys = systemMsg + ` Rewrite the roast. Avoid numbers/attempt counts. Avoid repeating prior roasts. Keep within tier rules. JSON ONLY.`;
+        const round3 = await generateCandidates(rewriteSys);
+        if (isDev) console.log(`[savage] round3: ${round3.length} valid candidates`);
+        candidates = round3;
+      }
+
+      // Dev: log savage rejection distribution
+      if (isDev && tierName === 'savage' && Object.keys(savageRejectCounts).length > 0) {
+        const top = Object.entries(savageRejectCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+        console.log(`[savage] rejection reasons: ${top.map(([r, c]) => `${r}=${c}`).join(', ')}`);
+      }
+
       if (candidates.length > 0) {
         candidates.sort((a, b) => b.score - a.score);
         const best = candidates[0];
         roasts = [best.text];
         themes = best.themes || [];
         // Track savage roasts for anti-repeat
-        if (tierName === 'savage') {
-          recentSavageRoasts.push(best.text.toLowerCase());
-          while (recentSavageRoasts.length > MAX_RECENT_SAVAGE) recentSavageRoasts.shift();
-        }
+        if (tierName === 'savage') pushRecentSavage(best.text);
         if (isDev) {
           console.log(`[${tierName}] PICKED score=${best.score} from ${candidates.length} total — "${best.text.slice(0, 80)}…"`);
           if (candidates.length > 1) console.log(`[${tierName}] runner-up score=${candidates[1].score}`);
@@ -935,14 +1174,58 @@ app.post('/api/roast', async (req, res) => {
     roasts = roasts.slice(0, config.count);
 
     // --- Fill with fallbacks if needed ---
-    for (const fb of levelFallbacks) {
-      if (roasts.length >= config.count) break;
-      const text = (config.maxSentences || config.maxChars)
-        ? clampRoast(fb, config.maxSentences, config.maxChars, config.maxWords)
-        : fb;
-      if (text.length > 0 && !seen.has(text.toLowerCase())) {
-        roasts.push(text);
-        seen.add(text.toLowerCase());
+    if (tierName === 'savage' && roasts.length < config.count) {
+      // Pick least-overlapping fallback relative to recent savage roasts
+      const recentWindow = recentSavageRoasts.slice(-25);
+      const lastRecent = recentSavageRoasts.length > 0
+        ? recentSavageRoasts[recentSavageRoasts.length - 1] : null;
+      const allOptions = levelFallbacks
+        .map(fb => {
+          const text = (config.maxSentences || config.maxChars)
+            ? clampRoast(fb, config.maxSentences, config.maxChars, config.maxWords) : fb;
+          if (!text || seen.has(text.toLowerCase())) return null;
+          const maxOverlap = recentWindow.length > 0
+            ? Math.max(...recentWindow.map(prev => tokenOverlap(text, prev)))
+            : 0;
+          const isExactLast = lastRecent && text.toLowerCase() === lastRecent;
+          return { text, maxOverlap, isExactLast };
+        })
+        .filter(Boolean);
+      // Filter out exact-match with most recent, unless it's the only option
+      const nonExact = allOptions.filter(e => !e.isExactLast);
+      const scored = (nonExact.length > 0 ? nonExact : allOptions)
+        .sort((a, b) => a.maxOverlap - b.maxOverlap);
+      // Log skipped exact matches
+      if (isDev) {
+        for (const e of allOptions) {
+          if (e.isExactLast && nonExact.length > 0) console.log(`[savage] fallback-skip-exact: "${e.text.slice(0, 60)}"`);
+        }
+      }
+      if (scored.length > 0 && roasts.length < config.count) {
+        // Randomize among top 3 least-overlapping options
+        const top = scored.filter(e => e.maxOverlap < 0.45).slice(0, 3);
+        const pick = top.length > 0
+          ? top[Math.floor(Math.random() * top.length)]
+          : scored[0];
+        roasts.push(pick.text);
+        seen.add(pick.text.toLowerCase());
+        pushRecentSavage(pick.text);
+        if (isDev) console.log(`[savage] fallback-used: "${pick.text.slice(0, 60)}"`);
+      }
+    } else {
+      for (const fb of levelFallbacks) {
+        if (roasts.length >= config.count) break;
+        const text = (config.maxSentences || config.maxChars)
+          ? clampRoast(fb, config.maxSentences, config.maxChars, config.maxWords)
+          : fb;
+        if (text.length > 0 && !seen.has(text.toLowerCase())) {
+          roasts.push(text);
+          seen.add(text.toLowerCase());
+          if (tierName === 'savage') {
+            pushRecentSavage(text);
+            if (isDev) console.log(`[savage] fallback-used: "${text.slice(0, 60)}"`);
+          }
+        }
       }
     }
 
