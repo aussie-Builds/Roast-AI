@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { StyleSheet, Pressable, View, ScrollView, ActivityIndicator } from 'react-native';
+import { StyleSheet, Pressable, View, ScrollView, ActivityIndicator, Alert } from 'react-native';
 import { Image } from 'expo-image';
 import { File } from 'expo-file-system';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -8,7 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { API_BASE_URL } from '@/constants/api';
 
-type RoastLevel = 'mild' | 'medium' | 'savage';
+type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 
 export default function PreviewScreen() {
   const { uri } = useLocalSearchParams<{ uri: string }>();
@@ -22,6 +22,20 @@ export default function PreviewScreen() {
     if (!uri) {
       setError('No image found. Please retake the photo.');
       return;
+    }
+
+    if (level === 'nuclear') {
+      const confirmed = await new Promise<boolean>((resolve) =>
+        Alert.alert(
+          'Nuclear mode is experimental. Proceed?',
+          undefined,
+          [
+            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Proceed', style: 'destructive', onPress: () => resolve(true) },
+          ],
+        ),
+      );
+      if (!confirmed) return;
     }
 
     setIsLoading(true);
@@ -85,7 +99,7 @@ export default function PreviewScreen() {
         <View style={styles.levelContainer}>
           <ThemedText style={styles.levelLabel}>Roast Level:</ThemedText>
           <View style={styles.levelButtons}>
-            {(['mild', 'medium', 'savage'] as RoastLevel[]).map((l) => (
+            {(['mild', 'medium', 'savage', 'nuclear'] as RoastLevel[]).map((l) => (
               <Pressable
                 key={l}
                 style={[styles.levelButton, level === l && styles.levelButtonActive]}
