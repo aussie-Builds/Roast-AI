@@ -36,15 +36,15 @@ const INTENSITY_CONFIG = {
   savage: {
     count: 1,
     minChars: 0,
-    maxChars: 140,
-    maxSentences: 2,
-    maxTokens: 60,
-    candidates: 4,
+    maxChars: 120,
+    maxWords: 16,
+    maxSentences: 1,
+    maxTokens: 40,
     temperature: 0.9,
-    presence_penalty: 0.6,
-    frequency_penalty: 0.4,
-    style: 'sharp, quick, humiliating — a slap and walk away',
-    format: 'ONE roast (1–2 sentences, max 25 words); no numbered list',
+    presence_penalty: 0.5,
+    frequency_penalty: 0.3,
+    style: 'one sharp stab — quick, visual, brutal',
+    format: 'ONE sentence, 8–16 words, ends on a punch word; no list',
   },
   nuclear: {
     count: 1,
@@ -93,6 +93,29 @@ const NUCLEAR_IMPERATIVES = [
   'upgrade', 'fix', 'try', 'go', 'get', 'stop', 'start', 'learn',
 ];
 
+const SAVAGE_IMPERATIVES = [
+  'upgrade', 'fix', 'try', 'go', 'get', 'stop', 'start', 'learn',
+];
+
+const SAVAGE_BANNED_PHRASES = [
+  // template openers GPT-4o loves
+  "i've seen brighter", 'that face just called', 'with that lighting',
+  'you look like', 'one bad audition', 'sleep-deprived extra',
+  // scene/horror framing
+  'dimly lit shed', 'warehouse', 'garage', 'interrogated', 'interrogation',
+  // advice framing
+  "it's time to", 'time to', 'you should', 'you need to',
+  'do better', 'fix that', 'upgrade both', 'try again', 'start over',
+  // soft observational AI starters
+  'screams', "it's like", 'with that', 'your expression screams',
+  "i've seen", 'in this photo', 'this image', "you're the type",
+];
+
+const SAVAGE_BANNED_WORDS = [
+  'alive', 'lifeless', 'hollow', 'void', 'desperate', 'lonely',
+  'dead-eyed', 'soulless', 'empty',
+];
+
 const FALLBACKS = {
   mild: [
     "Your selfie game is… developing. Like a Polaroid from 2003.",
@@ -138,15 +161,19 @@ MEDIUM RULES:
   } else if (tierName === 'savage') {
     tierRules = `
 SAVAGE RULES (STRICT):
-- EXACTLY 1 or 2 sentences. Maximum 25 words total.
-- One observation. One punchline. That's it.
-- No commentary after the punch. No advice. No encouragement.
-- No emotional analysis. No filler words.
-- Avoid generic insults (lazy, boring, ugly, tired).
-- NEVER use: ${BANNED_HEDGING.join(', ')}
-- No therapy language: "at what cost", "perhaps", "maybe", "reads as", "it's as if"
-- No abstract words: apathy, indifference, existential, aesthetic, monotony.
-- Savage should feel like a slap and walk away.`;
+- Exactly ONE sentence. No second sentence. No follow-ups. No explanations.
+- 8–16 words total. Not shorter. Not longer.
+- Reference ONE visible detail (hair, outfit, expression, lighting, pose, background, clothing).
+- End on a punch word — the last word must sting. Not neutral, not trailing off.
+- Use "you" or "your". Attack the person, not the scene.
+- No "you look like". No "it's like". No "screams". No "with that".
+- No storytelling. No metaphors. No similes. No scene-setting.
+- No imperatives or advice (no "upgrade", "fix", "try", "stop", "start", "learn", "get", "go").
+- No questions. No emojis. No encouragement.
+- Quick stab. Clean cut. Walk away.
+- Good examples: "Even your PC looks disappointed.", "That lighting did you zero favors.", "Confidence didn't load with the rest of you.", "Your mirror deserves hazard pay."
+- NEVER use: ${SAVAGE_BANNED_PHRASES.join(', ')}
+- NEVER use these words: ${SAVAGE_BANNED_WORDS.join(', ')}`;
   } else if (tierName === 'nuclear') {
     tierRules = `
 NUCLEAR RULES (STRICT — must be significantly harsher than Savage):
@@ -217,8 +244,8 @@ The "themes" array must contain one short theme tag per roast.
 Output ONLY the JSON. No labels. No explanations.`;
 }
 
-// --- Hard enforcement: clamp roast to sentence + character limits ---
-function clampRoast(text, maxSentences, maxChars) {
+// --- Hard enforcement: clamp roast to sentence + word + character limits ---
+function clampRoast(text, maxSentences, maxChars, maxWords) {
   // Normalize whitespace
   let r = text.replace(/\s+/g, ' ').trim();
   // Enforce sentence limit
@@ -226,6 +253,19 @@ function clampRoast(text, maxSentences, maxChars) {
     const sentences = r.match(/[^.!?]*[.!?]+/g);
     if (sentences && sentences.length > maxSentences) {
       r = sentences.slice(0, maxSentences).join('').trim();
+    }
+  }
+  // Enforce word limit
+  if (maxWords) {
+    const words = r.split(/\s+/);
+    if (words.length > maxWords) {
+      r = words.slice(0, maxWords).join(' ');
+      // Try to end on sentence boundary
+      const lastPunct = r.search(/[.!?][^.!?]*$/);
+      if (lastPunct > r.length * 0.4) r = r.slice(0, lastPunct + 1);
+      r = r.trim();
+      // Add period if trimmed text doesn't end with punctuation
+      if (r.length > 0 && !/[.!?]$/.test(r)) r += '.';
     }
   }
   // Enforce character limit — trim at word boundary
@@ -316,14 +356,46 @@ function validateRoast(text, tierName) {
   const hasVisual = VISUAL_KEYWORDS.some(kw => lower.includes(kw));
   if (!hasVisual && tierName !== 'nuclear') reasons.push('no-visual-detail');
 
-  // Nuclear-only: banned identity-erasure phrases
+  // Savage-only validation
+  if (tierName === 'savage') {
+    const savageWordCount = text.trim().split(/\s+/).length;
+    // Must be 8–16 words
+    if (savageWordCount > 16) reasons.push(`savage-too-many-words:${savageWordCount}/16`);
+    if (savageWordCount < 8) reasons.push(`savage-too-few-words:${savageWordCount}/8`);
+    // Exactly 1 sentence
+    const sSentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+    if (sSentences.length > 1) reasons.push(`savage-multi-sentence:${sSentences.length}`);
+    // No questions
+    if (text.includes('?')) reasons.push('savage-question');
+    // Banned phrases
+    for (const phrase of SAVAGE_BANNED_PHRASES) {
+      if (lower.includes(phrase)) { reasons.push(`savage-banned:${phrase}`); break; }
+    }
+    // Banned words (bleak tone)
+    for (const word of SAVAGE_BANNED_WORDS) {
+      const re = new RegExp(`\\b${word}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`savage-banned-word:${word}`); break; }
+    }
+    // No sentences starting with imperative verbs
+    for (const s of sSentences) {
+      const fw = s.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '');
+      if (SAVAGE_IMPERATIVES.includes(fw)) {
+        reasons.push(`savage-imperative:${fw}`);
+        break;
+      }
+    }
+  }
+
+  // Nuclear-only: banned identity-erasure phrases (word-boundary regex)
   if (tierName === 'nuclear') {
     for (const phrase of NUCLEAR_BANNED) {
-      if (lower.includes(phrase)) { reasons.push(`nuclear-banned:${phrase}`); break; }
+      const re = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`nuclear-banned:${phrase}`); break; }
     }
-    // Nuclear-only: banned worthlessness/erasure closers
+    // Nuclear-only: banned worthlessness/erasure closers (word-boundary regex)
     for (const phrase of NUCLEAR_BANNED_WORTHLESSNESS) {
-      if (lower.includes(phrase)) { reasons.push(`banned-nuclear:${phrase}`); break; }
+      const re = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`banned-nuclear:${phrase}`); break; }
     }
     // Nuclear-only: no advice/imperatives — check if any sentence starts with one
     const nSentences = text.match(/[^.!?]*[.!?]+/g) || [text];
@@ -392,8 +464,52 @@ function scoreRoast(text, tierName) {
 
   // Penalize: too many sentences for tier
   const sentenceCount = (text.match(/[.!?]+/g) || []).length;
-  if (tierName === 'savage' && sentenceCount > 2) score -= 15;
+  if (tierName === 'savage' && sentenceCount > 1) score -= 15;
   if (tierName === 'nuclear' && sentenceCount > 4) score -= 10;
+
+  // --- Savage-specific scoring ---
+  if (tierName === 'savage') {
+    const wordCount = text.trim().split(/\s+/).length;
+    const sentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+
+    // Reward: sweet spot 8–16 words
+    if (wordCount >= 8 && wordCount <= 16) score += 25;
+    // Penalize: outside range
+    if (wordCount > 16) score -= 40;
+    if (wordCount < 8) score -= 20;
+
+    // Reward: exactly 1 sentence; penalize 2+
+    if (sentences.length === 1) score += 20;
+    else score -= 30;
+
+    // Reward: direct address ("you" / "your")
+    const youCount = (lower.match(/\byou(r|'re|'ve|'ll)?\b/g) || []).length;
+    if (youCount >= 1) score += 15;
+    if (youCount === 0) score -= 15;
+
+    // Reward: ends with punch punctuation
+    if (/[.!]$/.test(text.trim())) score += 10;
+
+    // Reward: visual anchor present
+    const savageVisualHits = VISUAL_KEYWORDS.filter(kw => lower.includes(kw)).length;
+    if (savageVisualHits >= 1) score += 10;
+    if (savageVisualHits === 0) score -= 10;
+
+    // Penalize: banned phrases (-25 each)
+    for (const bp of SAVAGE_BANNED_PHRASES) {
+      if (lower.includes(bp)) score -= 25;
+    }
+    // Penalize: banned bleak words (-15 each)
+    for (const bw of SAVAGE_BANNED_WORDS) {
+      const re = new RegExp(`\\b${bw}\\b`, 'i');
+      if (re.test(text)) score -= 15;
+    }
+    // Penalize: imperative openers
+    const fw = sentences[0]?.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '');
+    if (SAVAGE_IMPERATIVES.includes(fw)) score -= 30;
+    // Penalize: questions
+    if (text.includes('?')) score -= 15;
+  }
 
   // --- Nuclear-specific scoring ---
   if (tierName === 'nuclear') {
@@ -429,8 +545,8 @@ function scoreRoast(text, tierName) {
     const asCount = (lower.match(/\bas\s+a\b/g) || []).length;
     if (likeCount + asCount >= 2) score -= 10;
 
-    // Reward: personal dismantling language
-    const personalWords = ['nobody', 'everyone', 'no one', 'people', "that's why"];
+    // Reward: personal dismantling language (no overlap with banned worthlessness — removed "nobody"/"no one")
+    const personalWords = ['everyone', 'people', "that's why", "that's what"];
     const personalHits = personalWords.filter(p => lower.includes(p)).length;
     if (personalHits >= 1) score += 10;
 
@@ -439,8 +555,8 @@ function scoreRoast(text, tierName) {
     const strongHits = strongAssertions.filter(a => lower.includes(a)).length;
     if (strongHits >= 1) score += 10;
 
-    // Reward: competence/status hit words
-    const statusWords = ['serious', 'respect', 'confidence', 'competence', 'relevant', 'forgettable', 'embarrassing', 'pathetic'];
+    // Reward: competence/status hit words (no overlap with banned worthlessness)
+    const statusWords = ['serious', 'confidence', 'competence', 'embarrassing', 'pathetic', 'delusional', 'overconfident'];
     const statusHits = statusWords.filter(w => lower.includes(w)).length;
     if (statusHits >= 1) score += 10;
 
@@ -474,10 +590,13 @@ function scoreRoast(text, tierName) {
     if (lastWordCount <= 5) score += 10; // strong knockout bonus
     const lastLower = lastSentence.toLowerCase();
 
-    // Penalize: worthlessness language anywhere in text (-60 heavy penalty)
+    // Penalize: worthlessness language anywhere in text (word-boundary, -80 per hit, capped -160)
+    let worthlessPenalty = 0;
     for (const wp of NUCLEAR_BANNED_WORTHLESSNESS) {
-      if (lower.includes(wp)) { score -= 60; break; }
+      const re = new RegExp(`\\b${wp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) worthlessPenalty += 80;
     }
+    score -= Math.min(worthlessPenalty, 160);
 
     // Penalize: final sentence contains question mark
     if (lastSentence.includes('?')) score -= 15;
@@ -581,13 +700,13 @@ function scoreRoast(text, tierName) {
     }
     score -= Math.min(aiPhrasePenalty, 45);
 
-    // Reward: social-perception language (how others see/treat the subject)
-    const socialPerceptionWords = ['respect', 'serious', 'ignored', 'forgettable', 'tolerate', 'mute', 'taken seriously', 'relevant'];
+    // Reward: social-perception language (no overlap with banned worthlessness)
+    const socialPerceptionWords = ['tolerate', 'taken seriously', 'second choice', 'last pick', 'talked over'];
     const socialHits = socialPerceptionWords.filter(w => lower.includes(w)).length;
     if (socialHits >= 1) score += 15;
 
-    // Reward: sentences starting with social-reaction openers
-    const socialOpeners = sentences.filter(s => /^\s*(nobody|no one|everyone|people)\b/i.test(s)).length;
+    // Reward: sentences starting with social-reaction openers (only "everyone"/"people" — NOT "nobody"/"no one")
+    const socialOpeners = sentences.filter(s => /^\s*(everyone|people)\b/i.test(s)).length;
     if (socialOpeners >= 1) score += 15;
 
     // Reward: sentences referencing how "people" or "everyone" reacts
@@ -623,10 +742,10 @@ app.post('/api/roast', async (req, res) => {
     const avoidThemes = recentThemes.length > 0 ? recentThemes.join(', ') : 'none yet';
 
     const prompt = buildPrompt(config, tierName, avoidThemes);
-    const isHighTier = tierName === 'savage' || tierName === 'nuclear';
+    const isHighTier = tierName === 'nuclear';
 
     const systemMsg = tierName === 'savage'
-      ? `You are a roast comedian. Respond with ONLY valid JSON. No markdown. No code fences. No explanations. No prose outside JSON. Keep it extremely short.`
+      ? `You are a roast comedian. ONE sentence. 8–16 words. Reference something visible. End on a punch word. Respond with ONLY valid JSON. No markdown. No code fences.`
       : tierName === 'nuclear'
         ? `You are a ruthless roast comedian. Respond with ONLY valid JSON. No markdown. No code fences. No explanations. 3–4 sentences, escalating intensity, short knockout closer. Cold and cutting.`
         : `You are a sharp, observational roast comedian. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanations.`;
@@ -677,7 +796,7 @@ app.post('/api/roast', async (req, res) => {
             continue;
           }
           for (const r of result.roasts) {
-            const clamped = clampRoast(r.replace(/\s+/g, ' ').trim(), config.maxSentences, config.maxChars);
+            const clamped = clampRoast(r.replace(/\s+/g, ' ').trim(), config.maxSentences, config.maxChars, config.maxWords);
             if (!clamped) continue;
             const v = validateRoast(clamped, tierName);
             if (!v.valid) {
@@ -757,7 +876,7 @@ app.post('/api/roast', async (req, res) => {
     for (const fb of levelFallbacks) {
       if (roasts.length >= config.count) break;
       const text = (config.maxSentences || config.maxChars)
-        ? clampRoast(fb, config.maxSentences, config.maxChars)
+        ? clampRoast(fb, config.maxSentences, config.maxChars, config.maxWords)
         : fb;
       if (text.length > 0 && !seen.has(text.toLowerCase())) {
         roasts.push(text);
@@ -768,10 +887,23 @@ app.post('/api/roast', async (req, res) => {
     roasts = roasts.slice(0, config.count);
 
     // --- Final hard clamp (safety net) ---
-    if (config.maxSentences || config.maxChars) {
+    if (config.maxSentences || config.maxChars || config.maxWords) {
       roasts = roasts
-        .map(r => clampRoast(r, config.maxSentences, config.maxChars))
+        .map(r => clampRoast(r, config.maxSentences, config.maxChars, config.maxWords))
         .filter(r => r.length > 0);
+    }
+
+    // --- Savage post-clamp 16-word hard cap ---
+    if (tierName === 'savage') {
+      roasts = roasts.map(r => {
+        const words = r.split(/\s+/);
+        if (words.length > 16) {
+          let trimmed = words.slice(0, 16).join(' ').trim();
+          if (!/[.!?]$/.test(trimmed)) trimmed += '.';
+          return trimmed;
+        }
+        return r;
+      });
     }
 
     // Update rolling theme tracker
