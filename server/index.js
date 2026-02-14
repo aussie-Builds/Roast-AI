@@ -40,6 +40,7 @@ const INTENSITY_CONFIG = {
     maxWords: 16,
     maxSentences: 1,
     maxTokens: 40,
+    candidates: 8,
     temperature: 0.9,
     presence_penalty: 0.5,
     frequency_penalty: 0.3,
@@ -109,11 +110,28 @@ const SAVAGE_BANNED_PHRASES = [
   // soft observational AI starters
   'screams', "it's like", 'with that', 'your expression screams',
   "i've seen", 'in this photo', 'this image', "you're the type",
+  // additional AI template openers
+  'your expression', 'your vibe', "it's giving", 'energy of',
+  'giving me', 'major', 'the aesthetic',
 ];
 
 const SAVAGE_BANNED_WORDS = [
   'alive', 'lifeless', 'hollow', 'void', 'desperate', 'lonely',
   'dead-eyed', 'soulless', 'empty',
+];
+
+// Overused tokens: not hard-banned but heavily penalized in scoring
+const SAVAGE_OVERUSED_TOKENS = [
+  'expression', 'personality', 'lighting', 'energy', 'vibe',
+  'aura', 'presence', 'effort', 'attempt',
+];
+
+// Punch ending words: reward when savage last word is one of these
+const SAVAGE_PUNCH_ENDINGS = [
+  'pathetic', 'tragic', 'embarrassing', 'cringe', 'weak', 'sad',
+  'rough', 'brutal', 'painful', 'mid', 'unforgivable', 'criminal',
+  'audacity', 'offensive', 'insulting', 'bleak', 'haunting',
+  'disappointed', 'wrong', 'worse', 'bold', 'coward', 'fraud',
 ];
 
 const FALLBACKS = {
@@ -149,6 +167,20 @@ const FALLBACKS = {
 const recentThemes = [];
 const MAX_RECENT_THEMES = 15;
 
+// Track recent savage roasts to penalize repetition across calls
+const recentSavageRoasts = [];
+const MAX_RECENT_SAVAGE = 20;
+
+// Token overlap score: 0–1 (fraction of shared words)
+function tokenOverlap(a, b) {
+  const setA = new Set(a.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(w => w.length > 2));
+  const setB = new Set(b.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(w => w.length > 2));
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let shared = 0;
+  for (const w of setA) { if (setB.has(w)) shared++; }
+  return shared / Math.min(setA.size, setB.size);
+}
+
 function buildPrompt(config, tierName, avoidThemes) {
   let tierRules = '';
   if (tierName === 'medium') {
@@ -171,6 +203,9 @@ SAVAGE RULES (STRICT):
 - No imperatives or advice (no "upgrade", "fix", "try", "stop", "start", "learn", "get", "go").
 - No questions. No emojis. No encouragement.
 - Quick stab. Clean cut. Walk away.
+- The LAST WORD should land hard. Prefer punch words like: pathetic, tragic, embarrassing, cringe, weak, painful, mid, criminal, disappointing, worse.
+- Avoid ending on neutral words (the, it, is, that, with).
+- Avoid overusing: expression, personality, lighting, energy, vibe, aura, presence, effort — these are GPT crutches.
 - Good examples: "Even your PC looks disappointed.", "That lighting did you zero favors.", "Confidence didn't load with the rest of you.", "Your mirror deserves hazard pay."
 - NEVER use: ${SAVAGE_BANNED_PHRASES.join(', ')}
 - NEVER use these words: ${SAVAGE_BANNED_WORDS.join(', ')}`;
@@ -349,7 +384,7 @@ function validateRoast(text, tierName) {
   }
 
   // Length limits
-  if (tierName === 'savage' && text.length > 140) reasons.push(`too-long:${text.length}/140`);
+  if (tierName === 'savage' && text.length > 120) reasons.push(`too-long:${text.length}/120`);
   if (tierName === 'nuclear' && text.length > 400) reasons.push(`too-long:${text.length}/400`);
 
   // Must reference a visible detail (hard-fail for savage, scoring penalty for nuclear)
@@ -469,7 +504,8 @@ function scoreRoast(text, tierName) {
 
   // --- Savage-specific scoring ---
   if (tierName === 'savage') {
-    const wordCount = text.trim().split(/\s+/).length;
+    const words = text.trim().split(/\s+/);
+    const wordCount = words.length;
     const sentences = text.match(/[^.!?]*[.!?]+/g) || [text];
 
     // Reward: sweet spot 8–16 words
@@ -495,6 +531,20 @@ function scoreRoast(text, tierName) {
     if (savageVisualHits >= 1) score += 10;
     if (savageVisualHits === 0) score -= 10;
 
+    // Reward: last word is a punch ending word (+20)
+    const lastWord = words[words.length - 1]?.toLowerCase().replace(/[^a-z]/g, '') || '';
+    if (SAVAGE_PUNCH_ENDINGS.includes(lastWord)) score += 20;
+    // Penalize: last word is neutral/filler (articles, prepositions, pronouns)
+    const neutralEndings = ['the', 'a', 'an', 'it', 'is', 'was', 'and', 'but', 'or', 'of', 'to', 'in', 'on', 'for', 'that', 'this', 'with'];
+    if (neutralEndings.includes(lastWord)) score -= 15;
+
+    // Penalize: overused AI tokens (-10 each, capped -30)
+    let overusedPenalty = 0;
+    for (const ot of SAVAGE_OVERUSED_TOKENS) {
+      if (lower.includes(ot)) overusedPenalty += 10;
+    }
+    score -= Math.min(overusedPenalty, 30);
+
     // Penalize: banned phrases (-25 each)
     for (const bp of SAVAGE_BANNED_PHRASES) {
       if (lower.includes(bp)) score -= 25;
@@ -509,6 +559,11 @@ function scoreRoast(text, tierName) {
     if (SAVAGE_IMPERATIVES.includes(fw)) score -= 30;
     // Penalize: questions
     if (text.includes('?')) score -= 15;
+
+    // Penalize: too similar to recent savage outputs (-30 if >50% token overlap)
+    for (const prev of recentSavageRoasts) {
+      if (tokenOverlap(text, prev) > 0.5) { score -= 30; break; }
+    }
   }
 
   // --- Nuclear-specific scoring ---
@@ -742,7 +797,7 @@ app.post('/api/roast', async (req, res) => {
     const avoidThemes = recentThemes.length > 0 ? recentThemes.join(', ') : 'none yet';
 
     const prompt = buildPrompt(config, tierName, avoidThemes);
-    const isHighTier = tierName === 'nuclear';
+    const isHighTier = tierName === 'savage' || tierName === 'nuclear';
 
     const systemMsg = tierName === 'savage'
       ? `You are a roast comedian. ONE sentence. 8–16 words. Reference something visible. End on a punch word. Respond with ONLY valid JSON. No markdown. No code fences.`
@@ -824,7 +879,9 @@ app.post('/api/roast', async (req, res) => {
         if (isDev) console.log(`[${tierName}] round1 weak (count=${candidates.length}, bestScore=${bestScore}), triggering round2`);
         const harderSys = tierName === 'nuclear'
           ? systemMsg + ` BE HARSHER. Sentence 1: vivid visual anchor. Sentence 2: character hit using "you" statements. Sentence 3: deeper life failure inferred from what's visible. Sentence 4: short knockout (under 8 words). Final sentence must be shortest. No questions. No filler. JSON ONLY.`
-          : systemMsg + ` BE MUCH SHORTER. MAX 25 WORDS. RESPOND WITH ONLY JSON. NO ESSAYS.`;
+          : tierName === 'savage'
+            ? systemMsg + ` EXACTLY ONE SENTENCE. 8–16 words ONLY. Pick ONE visible thing and destroy them with it. Last word must sting. NO template openers. NO "your expression". NO "you look like". JSON ONLY.`
+            : systemMsg + ` BE MUCH SHORTER. RESPOND WITH ONLY JSON. NO ESSAYS.`;
         const round2 = await generateCandidates(harderSys);
         if (isDev) console.log(`[${tierName}] round2: ${round2.length} valid candidates`);
         candidates = candidates.concat(round2);
@@ -835,6 +892,11 @@ app.post('/api/roast', async (req, res) => {
         const best = candidates[0];
         roasts = [best.text];
         themes = best.themes || [];
+        // Track savage roasts for anti-repeat
+        if (tierName === 'savage') {
+          recentSavageRoasts.push(best.text.toLowerCase());
+          while (recentSavageRoasts.length > MAX_RECENT_SAVAGE) recentSavageRoasts.shift();
+        }
         if (isDev) {
           console.log(`[${tierName}] PICKED score=${best.score} from ${candidates.length} total — "${best.text.slice(0, 80)}…"`);
           if (candidates.length > 1) console.log(`[${tierName}] runner-up score=${candidates[1].score}`);
@@ -893,15 +955,15 @@ app.post('/api/roast', async (req, res) => {
         .filter(r => r.length > 0);
     }
 
-    // --- Savage post-clamp 16-word hard cap ---
+    // --- Savage post-clamp: 16-word hard cap + ensure punctuation ---
     if (tierName === 'savage') {
       roasts = roasts.map(r => {
         const words = r.split(/\s+/);
         if (words.length > 16) {
-          let trimmed = words.slice(0, 16).join(' ').trim();
-          if (!/[.!?]$/.test(trimmed)) trimmed += '.';
-          return trimmed;
+          r = words.slice(0, 16).join(' ').trim();
         }
+        // Ensure savage always ends with . or !
+        if (!/[.!]$/.test(r.trim())) r = r.trim() + '.';
         return r;
       });
     }
