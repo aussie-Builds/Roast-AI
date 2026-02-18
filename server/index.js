@@ -630,10 +630,7 @@ const MAX_RECENT_LANES = 4;
 const recentNuclearOutfitFlags = []; // true/false per recent winner
 const MAX_OUTFIT_TRACK = 4;
 
-// Short-term anchor repetition tracking
-const NUCLEAR_ANCHOR_KEYWORDS = ['smile', 'half-smile', 'lighting', 'dim', 'exhaust', 'drain', 'tired'];
-const recentNuclearAnchors = []; // array of arrays of matched keywords per winner
-const MAX_NUCLEAR_ANCHOR_TRACK = 4;
+// (Nuclear anchor keywords removed — anchors are now built dynamically from the detail pack)
 
 // Module-level: track last target category for graphic-tee rotation
 let lastNuclearTargetCategory = null;
@@ -1125,10 +1122,19 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null } = {
   score += Math.min(visualHits, 2) * (tierName === 'nuclear' ? 5 : 10);
 
   // Reward: brevity (closer to target = better)
-  const targetLen = tierName === 'savage' ? 80 : tierName === 'nuclear' ? 220 : 250;
-  const lenDiff = Math.abs(text.length - targetLen);
-  // Gentler curve for nuclear so punchy 45-word nukes aren't crushed
-  score -= Math.floor(lenDiff / (tierName === 'nuclear' ? 25 : 15));
+  if (tierName === 'nuclear') {
+    // Nuclear uses word-count bands matching the 2-sentence output contract
+    const nucWc = text.trim().split(/\s+/).length;
+    if (nucWc >= 12 && nucWc <= 18) score += 18;
+    else if (nucWc >= 19 && nucWc <= 24) score += 10;
+    else if (nucWc >= 25 && nucWc <= 28) score += 2;
+    else if (nucWc > 28) score -= 25;
+    else if (nucWc < 12) score -= 20;
+  } else {
+    const targetLen = tierName === 'savage' ? 80 : 250;
+    const lenDiff = Math.abs(text.length - targetLen);
+    score -= Math.floor(lenDiff / 15);
+  }
 
   // Reward: ends with punctuation (punchline indicator)
   if (/[.!]$/.test(text.trim())) score += 10;
@@ -1151,7 +1157,7 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null } = {
   // Penalize: too many sentences for tier
   const sentenceCount = (text.match(/[.!?]+/g) || []).length;
   if (tierName === 'savage' && sentenceCount > 1) score -= 15;
-  if (tierName === 'nuclear' && sentenceCount > 4) score -= 10;
+  if (tierName === 'nuclear' && sentenceCount > 2) score -= 25;
 
   // --- Savage-specific scoring (short nuclear) ---
   if (tierName === 'savage') {
@@ -1606,16 +1612,6 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null } = {
       if (deepMatches && deepMatches.length >= 2) score -= 12;
     }
 
-    // Short-term anchor repetition pressure
-    const candidateAnchors = NUCLEAR_ANCHOR_KEYWORDS.filter(kw => lower.includes(kw));
-    // Count how many times each anchor appeared in recent winners
-    const anchorFreq = {};
-    for (const prevAnchors of recentNuclearAnchors) {
-      for (const a of prevAnchors) { anchorFreq[a] = (anchorFreq[a] || 0) + 1; }
-    }
-    for (const a of candidateAnchors) {
-      if ((anchorFreq[a] || 0) >= 2) { score -= 15; break; }
-    }
   }
 
   return score;
@@ -1853,6 +1849,13 @@ const NV2_SAFE_FALLBACKS = [
   'You posed like you rehearsed this. The rehearsal needed rehearsal.',
 ];
 
+// --- Freeform stem bans (nuclear-v2 freeform mode) ---
+const NV2_FREEFORM_STEM_BANS = [
+  'got ammo', 'bench yourself', 'camera was too generous',
+  'internet took screenshots', 'turned off notifications',
+  'left the chat', 'the timeline remembers',
+];
+
 // --- Play-Safe content filter ---
 const NV2_DENY_SLURS = [
   // Racial/ethnic slurs (abbreviated patterns to catch variants)
@@ -1932,7 +1935,8 @@ function nv2GetOpenerType(tpl) {
 
 // Social-context terms for nuclear status hits (weighted)
 // Generic personal anchors — limited set so they don't dominate
-const GENERIC_OUTFIT_ANCHORS = ['jacket', 'fit', 'outfit'];
+const GENERIC_OUTFIT_ANCHORS = ['fit', 'outfit'];
+const GENERIC_OUTERWEAR_ANCHORS = ['jacket', 'hoodie', 'coat'];
 const GENERIC_HAIR_ANCHORS  = ['hair'];
 
 // Social context pools — three modes with per-client repeat avoidance
@@ -1941,15 +1945,19 @@ const NV2_SOCIAL_PLATFORM = ['the comments', 'the feed', 'the timeline', 'the al
 const NV2_SOCIAL_OFFLINE  = ['your mates', 'group chat', 'someone you know'];
 const NV2_MAX_RECENT_SOCIAL = 5;
 
+const NV2_AUDIENCE_COOLDOWN = 5;
+const NV2_OVERUSED_AUDIENCE = new Set(['anybody watching']);
+
 function nv2PickSocialContext(clientId) {
   const st = getClientState(clientId);
   if (!st.recentSocialContexts) st.recentSocialContexts = [];
-  const avoid = new Set(st.recentSocialContexts.slice(-NV2_MAX_RECENT_SOCIAL));
+  if (!st.recentAudiencePhrases) st.recentAudiencePhrases = [];
+  const avoid = new Set(st.recentAudiencePhrases.slice(-NV2_AUDIENCE_COOLDOWN));
 
-  // Mode roll: 65% implicit, 25% platform, 10% offline
+  // Mode roll: 75% implicit, 15% platform, 10% offline
   const roll = Math.random();
   let pool;
-  if (roll < 0.65) {
+  if (roll < 0.75) {
     pool = NV2_SOCIAL_IMPLICIT;
   } else if (roll < 0.90) {
     pool = NV2_SOCIAL_PLATFORM;
@@ -1957,11 +1965,18 @@ function nv2PickSocialContext(clientId) {
     pool = NV2_SOCIAL_OFFLINE;
   }
 
-  // Pick from pool, avoiding recent repeats
+  // Pick from pool, avoiding recent audience phrases
   let candidates = pool.filter(t => !avoid.has(t));
+  // Extra penalty: halve chance of overused phrases by filtering them 50% of the time
+  if (candidates.length > 1 && Math.random() < 0.5) {
+    const filtered = candidates.filter(t => !NV2_OVERUSED_AUDIENCE.has(t));
+    if (filtered.length > 0) candidates = filtered;
+  }
   if (candidates.length === 0) candidates = pool;
   const pick = candidates[Math.floor(Math.random() * candidates.length)];
 
+  st.recentAudiencePhrases.push(pick);
+  if (st.recentAudiencePhrases.length > 10) st.recentAudiencePhrases.shift();
   st.recentSocialContexts.push(pick);
   if (st.recentSocialContexts.length > 10) st.recentSocialContexts.shift();
   return pick;
@@ -1982,6 +1997,8 @@ function getClientState(clientId) {
   // Backfill for existing clients
   if (!st.recentMicdrops) st.recentMicdrops = [];
   if (!st.recentSocialContexts) st.recentSocialContexts = [];
+  if (!st.recentNuclearTexts) st.recentNuclearTexts = [];
+  if (!st.recentAudiencePhrases) st.recentAudiencePhrases = [];
   if (!st.lastSentenceStarter) st.lastSentenceStarter = null;
   return st;
 }
@@ -2257,7 +2274,7 @@ const NV2_SELFIE_TAG_ALLOWED_OUTFIT = new Set([
 const NV2_SELFIE_TAG_ALLOWED_EXPRESSION = new Set([
   'blank','smug','confused','bored','forced smile',
   'duck face','squinting','surprised','zoned out','intense',
-  'unbothered','cringe','awkward grin','side-eye','pouty','unknown'
+  'unbothered','cringe','awkward grin','side-eye','pouty','frown','unknown'
 ]);
 const NV2_SELFIE_TAG_ALLOWED_GROOMING = new Set([
   'unshaved','over-groomed','low-effort',
@@ -2295,7 +2312,12 @@ function normTag(v) {
 const HAIR_SYNONYMS = { short: 'freshly cut', trimmed: 'freshly cut', neat: 'freshly cut', bald: 'buzzed', shaved: 'buzzed', curly: 'frizzy', wavy: 'frizzy' };
 function mapHair(v) { return v && HAIR_SYNONYMS[v] || v; }
 
-const EXPRESSION_SYNONYMS = { neutral: 'blank', serious: 'blank', tired: 'bored' };
+const EXPRESSION_SYNONYMS = {
+  neutral: 'deadpan', serious: 'deadpan', tired: 'bored',
+  'straight face': 'deadpan', 'straight-faced': 'deadpan', 'neutral expression': 'deadpan',
+  'no expression': 'deadpan', expressionless: 'deadpan', 'blank stare': 'deadpan', 'flat expression': 'deadpan',
+  smile: 'awkward grin', smiling: 'awkward grin', 'big smile': 'awkward grin', grin: 'awkward grin', grinning: 'awkward grin', beaming: 'awkward grin',
+  frown: 'frown', frowning: 'frown', scowl: 'frown', scowling: 'frown' };
 function mapExpression(v) { return v && EXPRESSION_SYNONYMS[v] || v; }
 
 const OUTFIT_SYNONYMS = { jacket: 'layered', hoodie: 'layered', coat: 'layered', outerwear: 'layered' };
@@ -2315,14 +2337,14 @@ function cleanTagToken(v) {
 
 async function extractSafeSelfieTags(imageInput) {
   const isDev = process.env.NODE_ENV !== 'production';
-  const emptyResult = { objects: [], angle: 'unknown', lighting: 'unknown', framing: 'unknown', setting: 'unknown', pose: 'unknown', hair: 'unknown', outfit: 'unknown', expression: 'unknown', grooming: 'unknown', bg_vibe: 'unknown', face_visibility: 'not_visible', face_confidence: 'low', hair_confidence: 'low', person_present: 'no', hair_visible: 'no', outfit_visible: 'no', face_visible: 'no', face_obstructed: 'no' };
+  const emptyResult = { objects: [], angle: 'unknown', lighting: 'unknown', framing: 'unknown', setting: 'unknown', pose: 'unknown', hair: 'unknown', outfit: 'unknown', expression: 'unknown', grooming: 'unknown', bg_vibe: 'unknown', face_visibility: 'not_visible', face_confidence: 'low', hair_confidence: 'low', person_present: 'no', hair_visible: 'no', outfit_visible: 'no', outerwear_visible: 'no', face_visible: 'no', face_obstructed: 'no' };
   try {
     const resp = await openai.responses.create({
       model: 'gpt-4o',
       input: [
         { role: 'system', content: 'You analyze photos for safe visual qualities only. Output ONLY valid JSON. Never mention identity, race, gender, age, body size, attractiveness, or protected traits. Never mention nudity or sexual content.' },
         { role: 'user', content: [
-          { type: 'input_text', text: 'Look at the image. Output ONLY valid JSON matching this schema: {"objects":[],"angle":"unknown","lighting":"unknown","framing":"unknown","setting":null,"pose":"unknown","hair":"unknown","outfit":"unknown","expression":"unknown","grooming":"unknown","bg_vibe":"unknown","face_visible":"no","face_obstructed":"no","face_visibility":"not_visible","face_confidence":"low","hair_confidence":"low","person_present":"no","hair_visible":"no","outfit_visible":"no"}. Deterministic face mapping: - If face_visible="yes" AND face_obstructed="no", then face_visibility MUST be "clear". - If face_visible="no", then face_visibility MUST be "not_visible". - If face_visible="yes" AND face_obstructed="yes", then face_visibility MUST be "partial" or "obscured" (choose based on severity). Visibility definitions: - face_visible="yes" if a face is present at all. - face_obstructed="yes" only if the face is cropped, blurred, heavily shadowed, or mostly covered. Confidence rule: - If face_visible="yes" AND face_obstructed="no", face_confidence MUST be at least "medium". objects: 0-12 nouns (monitor, keyboard, desk, tools, etc.). angle: one of "low angle","high angle","straight-on","tilted","off-center","unknown". lighting: one of "dim","harsh","backlit","screen glow","bright","mixed","unknown". framing: one of "close crop","too far","awkward crop","centered","unknown". setting: short label like "garage","bedroom","office","outdoors","plain wall" or null. pose: one of "stiff","forced casual","over-serious","trying-to-look-cool","deadpan","unknown". hair: one of "messy","greasy","flat","overgrown","slicked","helmet hair","bed head","windswept","frizzy","unkempt","freshly cut","dyed","parted","buzzed","unknown". outfit: one of "wrinkled","oversized","too tight","mismatched","graphic tee","athleisure","pajamas","formal","layered","plain","branded","vintage","basic","gym clothes","uniform","unknown". expression: one of "blank","smug","confused","bored","forced smile","duck face","squinting","surprised","zoned out","intense","unbothered","cringe","awkward grin","side-eye","pouty","unknown". grooming: one of "unshaved","over-groomed","low-effort","freshly trimmed","scraggly","clean-shaven","five-o-clock shadow","peach fuzz","handlebar","soul patch","unknown". bg_vibe: one of "cluttered","sterile","chaotic","bare","staged","dingy","flex-heavy","trying too hard","lived-in","fluorescent","grim","corporate","basement","unknown". face_visible: one of "yes","no". face_obstructed: one of "yes","no". face_visibility: one of "clear","partial","obscured","not_visible". face_confidence: one of "low","medium","high". hair_confidence: one of "low","medium","high". person_present: one of "yes","no". hair_visible: one of "yes","no". outfit_visible: one of "yes","no". Visibility rules: - If any person is visible, set person_present="yes". - If hair is visible, set hair_visible="yes" and hair_confidence to at least "medium". Hair may still be "unknown" if the style cannot be classified. - If clothing/outfit is visible, set outfit_visible="yes". Outfit label may remain "unknown" if unclear. Keep hair/expression/grooming/outfit as "unknown" unless clearly visible enough to classify confidently. If unsure, return "unknown" (not null) for enum fields. Only describe visible objects and SAFE photo/style qualities. Do NOT mention identity, race, gender, age, body size, attractiveness, or protected traits. Do NOT mention nudity/sexual content. Output ONLY valid JSON, no markdown fences.' },
+          { type: 'input_text', text: 'Look at the image. Output ONLY valid JSON matching this schema: {"objects":[],"angle":"unknown","lighting":"unknown","framing":"unknown","setting":null,"pose":"unknown","hair":"unknown","outfit":"unknown","expression":"unknown","grooming":"unknown","bg_vibe":"unknown","face_visible":"no","face_obstructed":"no","face_visibility":"not_visible","face_confidence":"low","hair_confidence":"low","person_present":"no","hair_visible":"no","outfit_visible":"no","outerwear_visible":"no"}. Deterministic face mapping: - If face_visible="yes" AND face_obstructed="no", then face_visibility MUST be "clear". - If face_visible="no", then face_visibility MUST be "not_visible". - If face_visible="yes" AND face_obstructed="yes", then face_visibility MUST be "partial" or "obscured" (choose based on severity). Visibility definitions: - face_visible="yes" if a face is present at all. - face_obstructed="yes" only if the face is cropped, blurred, heavily shadowed, or mostly covered. Confidence rule: - If face_visible="yes" AND face_obstructed="no", face_confidence MUST be at least "medium". objects: 0-12 nouns (monitor, keyboard, desk, tools, etc.). angle: one of "low angle","high angle","straight-on","tilted","off-center","unknown". lighting: one of "dim","harsh","backlit","screen glow","bright","mixed","unknown". framing: one of "close crop","too far","awkward crop","centered","unknown". setting: short label like "garage","bedroom","office","outdoors","plain wall" or null. pose: one of "stiff","forced casual","over-serious","trying-to-look-cool","deadpan","unknown". hair: one of "messy","greasy","flat","overgrown","slicked","helmet hair","bed head","windswept","frizzy","unkempt","freshly cut","dyed","parted","buzzed","unknown". outfit: one of "wrinkled","oversized","too tight","mismatched","graphic tee","athleisure","pajamas","formal","layered","plain","branded","vintage","basic","gym clothes","uniform","unknown". expression: one of "blank","smug","confused","bored","forced smile","duck face","squinting","surprised","zoned out","intense","unbothered","cringe","awkward grin","side-eye","pouty","frown","unknown". grooming: one of "unshaved","over-groomed","low-effort","freshly trimmed","scraggly","clean-shaven","five-o-clock shadow","peach fuzz","handlebar","soul patch","unknown". bg_vibe: one of "cluttered","sterile","chaotic","bare","staged","dingy","flex-heavy","trying too hard","lived-in","fluorescent","grim","corporate","basement","unknown". face_visible: one of "yes","no". face_obstructed: one of "yes","no". face_visibility: one of "clear","partial","obscured","not_visible". face_confidence: one of "low","medium","high". hair_confidence: one of "low","medium","high". person_present: one of "yes","no". hair_visible: one of "yes","no". outfit_visible: one of "yes","no". outerwear_visible: one of "yes","no". Outerwear rule: - outerwear_visible="yes" ONLY if a jacket, hoodie, coat, or outer layer is clearly present. - outerwear_visible="no" otherwise. Visibility rules: - If any person is visible, set person_present="yes". - If hair is visible, set hair_visible="yes" and hair_confidence to at least "medium". Hair may still be "unknown" if the style cannot be classified. - If clothing/outfit is visible, set outfit_visible="yes". Outfit label may remain "unknown" if unclear. Expression rule: - If the facial expression is clearly visible (e.g. smiling, grinning, frowning, scowling), choose the closest matching enum label instead of "unknown". - Broad smiles with teeth visible should map to "awkward grin" unless clearly subtle and relaxed. - Obvious frowns or scowls should map to "frown". - Use "unknown" only when the expression cannot be reasonably inferred. Keep hair/grooming/outfit as "unknown" unless clearly visible enough to classify confidently. If unsure, return "unknown" (not null) for enum fields. Only describe visible objects and SAFE photo/style qualities. Do NOT mention identity, race, gender, age, body size, attractiveness, or protected traits. Do NOT mention nudity/sexual content. Output ONLY valid JSON, no markdown fences.' },
           { type: 'input_image', image_url: `data:image/jpeg;base64,${imageInput}` },
         ]},
       ],
@@ -2356,7 +2378,7 @@ async function extractSafeSelfieTags(imageInput) {
     const outfitNorm = mapOutfit(normTag(parsed.outfit));
     const outfit = outfitNorm && NV2_SELFIE_TAG_ALLOWED_OUTFIT.has(outfitNorm) ? outfitNorm : 'unknown';
     const exprNorm = mapExpression(normTag(parsed.expression));
-    const expression = exprNorm && NV2_SELFIE_TAG_ALLOWED_EXPRESSION.has(exprNorm) ? exprNorm : 'unknown';
+    let expression = exprNorm && NV2_SELFIE_TAG_ALLOWED_EXPRESSION.has(exprNorm) ? exprNorm : 'unknown';
     const groomNorm = mapGrooming(normTag(parsed.grooming));
     const grooming = groomNorm && NV2_SELFIE_TAG_ALLOWED_GROOMING.has(groomNorm) ? groomNorm : 'unknown';
     const bgVibeNorm = normTag(parsed.bg_vibe);
@@ -2391,6 +2413,14 @@ async function extractSafeSelfieTags(imageInput) {
     const hair_visible = hairVisNorm && ALLOWED_YES_NO.has(hairVisNorm) ? hairVisNorm : 'no';
     const outfitVisNorm = normTag(parsed.outfit_visible);
     const outfit_visible = outfitVisNorm && ALLOWED_YES_NO.has(outfitVisNorm) ? outfitVisNorm : 'no';
+    const outerwearVisNorm = normTag(parsed.outerwear_visible);
+    const outerwear_visible = outerwearVisNorm && ALLOWED_YES_NO.has(outerwearVisNorm) ? outerwearVisNorm : 'no';
+
+    // Deterministic expression fallback: if face is clearly visible but expression is unknown, default to deadpan
+    const faceClear = (face_visible === 'yes' && face_obstructed === 'no' && face_confidence !== 'low');
+    if (faceClear && (!expression || expression === 'unknown')) {
+      expression = 'deadpan';
+    }
 
     // Debug: log rejected/unknown tags when DEBUG_TAGS=1
     if (process.env.DEBUG_TAGS === '1') {
@@ -2399,10 +2429,10 @@ async function extractSafeSelfieTags(imageInput) {
       if (parsed.grooming && grooming === 'unknown') console.log(`[selfie-tags] grooming->unknown: raw="${parsed.grooming}" norm="${normTag(parsed.grooming)}" mapped="${groomNorm}"`);
       if (parsed.pose && pose === 'unknown') console.log(`[selfie-tags] pose->unknown: raw="${parsed.pose}" norm="${poseNorm}"`);
       if (parsed.outfit && outfit === 'unknown') console.log(`[selfie-tags] outfit->unknown: raw="${parsed.outfit}" norm="${outfitNorm}"`);
-      console.log(`[selfie-tags] face_visible=${face_visible} face_obstructed=${face_obstructed} face_visibility=${face_visibility} face_confidence=${face_confidence} person_present=${person_present} hair_visible=${hair_visible} outfit_visible=${outfit_visible}`);
+      console.log(`[selfie-tags] face_visible=${face_visible} face_obstructed=${face_obstructed} face_visibility=${face_visibility} face_confidence=${face_confidence} person_present=${person_present} hair_visible=${hair_visible} outfit_visible=${outfit_visible} outerwear_visible=${outerwear_visible}`);
     }
 
-    return { objects, angle, lighting, framing, setting, pose, hair, outfit, expression, grooming, bg_vibe, face_visible, face_obstructed, face_visibility, face_confidence, hair_confidence, person_present, hair_visible, outfit_visible };
+    return { objects, angle, lighting, framing, setting, pose, hair, outfit, expression, grooming, bg_vibe, face_visible, face_obstructed, face_visibility, face_confidence, hair_confidence, person_present, hair_visible, outfit_visible, outerwear_visible };
   } catch (err) {
     if (isDev) console.log(`[nuclear-v2] selfie-tags error: ${err.message}`);
     return emptyResult;
@@ -2458,6 +2488,8 @@ const NV2_MICDROPS_GENERAL = [
   'Bench yourself immediately.', 'Return to drafts immediately.',
   'Camera should be confiscated.', 'Permanently on the bench.',
   'Bench yourself right now.', 'Last chance already passed.', 'Probation starts right now.',
+  // short punchy (2-word)
+  'Sit down.', 'Log off.', 'Walk away.', 'Hard pass.', 'Game over.', 'Not today.',
   // harsh punchy (nuclear tier)
   'Confidence sold separately.', 'Delete that immediately.', 'This wasn\'t the move.',
   'Not even close here.', 'Gallery should be locked.', 'Warranty voided on sight.',
@@ -2505,7 +2537,7 @@ const NV2_MICDROPS_ALL_LANES = Object.values(NV2_MICDROPS_LANE).flat();
 // Combined pool: general + all lanes (all guaranteed 3+ words, ban-filtered)
 const NV2_MICDROPS = [...NV2_MICDROPS_GENERAL, ...NV2_MICDROPS_ALL_LANES].filter(m => {
   const wc = m.replace(/\.$/, '').split(/\s+/).length;
-  if (wc < 3) return false;
+  if (wc < 2) return false;
   const lower = m.toLowerCase();
   if (NV2_BANNED_PHRASES.some(p => lower.includes(p))) return false;
   return true;
@@ -2798,29 +2830,100 @@ function nv2ContradictsFacts(text, facts) {
   return reasons.length > 0 ? reasons : null;
 }
 
+// --- Nuclear V2 freeform candidate generation ---
+async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
+  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Roast the visible styling choices, pose, effort, and setting — never the person's body, identity, or physical features. Be specific to what you see in the image. Be blunt, punchy, and original. No questions, no emojis, no hashtags, no profanity. Output EXACTLY 2 sentences totaling 12–26 words. Google Play safe.`;
+  const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Reference at least 2 of these visible details. Be specific, original, and punchy.`;
+
+  const calls = Array.from({ length: n }, () =>
+    openai.responses.create({
+      model: 'gpt-4o',
+      input: [
+        { role: 'system', content: systemMsg },
+        { role: 'user', content: [
+          { type: 'input_text', text: userMsg },
+          { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+        ]},
+      ],
+      max_output_tokens: 60,
+      temperature: 0.85,
+    }).then(r => r.output_text || null).catch(() => null)
+  );
+  return (await Promise.all(calls)).filter(Boolean);
+}
+
+// --- Nuclear V2 freeform candidate validation ---
+function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, isDev }) {
+  let score = 100;
+  // A. Exactly 2 sentences
+  const sents = text.match(/[^.!?]*[.!?]+/g);
+  if (!sents || sents.length !== 2) return { valid: false, score: 0, reason: 'sentenceCount' };
+  // B. 12-26 words
+  const wc = text.split(/\s+/).length;
+  if (wc < 12 || wc > 26) return { valid: false, score: 0, reason: 'wordCount' };
+  // B2. No questions, emojis, or hashtags
+  if (/\?/.test(text)) return { valid: false, score: 0, reason: 'question' };
+  if (/#\w/.test(text)) return { valid: false, score: 0, reason: 'hashtag' };
+  if (/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FA9F}]/u.test(text)) return { valid: false, score: 0, reason: 'emoji' };
+  // C. Safety
+  if (!isPlaySafe(text)) return { valid: false, score: 0, reason: 'safety' };
+  // D. Refusal
+  if (looksLikeRefusal(text)) return { valid: false, score: 0, reason: 'refusal' };
+  // E. Banned patterns
+  if (nv2HasBannedPatterns(text)) return { valid: false, score: 0, reason: 'bannedPattern' };
+  // F. Detail anchors: ≥2 from detailAnchors
+  const lower = text.toLowerCase();
+  const matchedDetails = detailAnchors.filter(d => lower.includes(d.toLowerCase()));
+  if (matchedDetails.length < 2) return { valid: false, score: 0, reason: 'missingDetails' };
+  // G. Scene anchor: ≥1 if sceneAnchors is non-empty
+  if (sceneAnchors.length > 0) {
+    const hasScene = sceneAnchors.some(s => lower.includes(s.toLowerCase()));
+    if (!hasScene) return { valid: false, score: 0, reason: 'missingScene' };
+  }
+  // H. Template stems
+  if (NV2_FREEFORM_STEM_BANS.some(s => lower.includes(s))) return { valid: false, score: 0, reason: 'templateStem' };
+  // I. Global repeat
+  if (isRecentNuclearRepeat(text)) return { valid: false, score: 0, reason: 'globalRepeat' };
+  // J. Phrase fatigue (per-client)
+  if (clientState.recentNuclearTexts) {
+    const candStart = text.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+    for (const prev of clientState.recentNuclearTexts.slice(-10)) {
+      const prevStart = prev.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+      if (candStart === prevStart) return { valid: false, score: 0, reason: 'phraseFatigue' };
+      if (tokenOverlap(text, prev) >= 0.55) return { valid: false, score: 0, reason: 'phraseFatigue' };
+    }
+  }
+  // K. Soft opener
+  if (s1IsSoft(text)) return { valid: false, score: 0, reason: 'softOpener' };
+  // L. Identity disclaimer
+  if (/i(?:'m| am) not sure who|can'?t (?:tell|identify)/i.test(text)) return { valid: false, score: 0, reason: 'identityDisclaimer' };
+  // M. Sentence-1 anchor gate: s1 must reference at least one photo-specific detail
+  if (!nv2HasAnyAnchorToken(sents[0], detailAnchors)) return { valid: false, score: 0, reason: 'noS1Anchor' };
+
+  // Scoring
+  score += Math.min(30, (matchedDetails.length - 2) * 10); // bonus for extra detail anchors
+  const s2 = sents[1].trim();
+  if (s2.split(/\s+/).length <= 5) score += 10; // punchy closer
+  if (/^you\b/i.test(text)) score += 5; // accusatory opener
+  score += nv2SoftPenalty(text, false); // existing soft penalty (returns negative)
+  // Opening cadence penalty
+  if (clientState.recentNuclearTexts && clientState.recentNuclearTexts.length > 0) {
+    const candStart = text.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+    for (const prev of clientState.recentNuclearTexts.slice(-3)) {
+      if (prev.split(/\s+/).slice(0, 4).join(' ').toLowerCase() === candStart) { score -= 15; break; }
+    }
+  }
+  return { valid: true, score, reason: null };
+}
+
 // --- Main Nuclear V2 generator ---
 async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTargets = [], selfieTags = null }) {
   const isDev = process.env.NODE_ENV !== 'production';
   const state = getClientState(clientId);
-  const maxAttempts = 3;
-  let attempts = 0;
   let fallbackUsed = false;
-  let pickedTarget = null;
-  let pickedStructure = null;
-  let pickedOpenerType = null;
   let finalRoast = null;
   let wordCount = 0;
-  let truncationApplied = false;
-  let targetFromScene = false;
-  let minWordRetry = false;
-  let targetSource = 'base'; // 'base', 'scene', 'tags'
-  let modifierUsed = null;
   let sceneTargetsAfterFilter = 0;
-  let micdropUsed = false;
-  let micdropText = null;
-  let micdropReplacedSentence2 = false;
-  let punchlineUsed = false;
-  let punchlineText = null;
 
   // Build enriched dynamic targets from selfie tags if available
   const tags = selfieTags || { objects: [], angle: null, lighting: null, framing: null, setting: null, pose: null, hair: null, outfit: null, expression: null, grooming: null, bg_vibe: null };
@@ -2833,941 +2936,143 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   }
   sceneTargetsAfterFilter = filteredSceneTargets.length;
 
-  const tagDynamicTargets = [...filteredSceneTargets];
-  if (tags.objects.length > 0) {
-    for (const obj of tags.objects) {
-      if (!tagDynamicTargets.includes(obj)) tagDynamicTargets.push(obj);
-    }
-  }
-  if (isKnownTag(tags.angle)) tagDynamicTargets.push('camera angle');
-  if (isKnownTag(tags.lighting)) tagDynamicTargets.push('lighting choice');
-  if (isKnownTag(tags.setting) && !tagDynamicTargets.includes(tags.setting)) tagDynamicTargets.push(tags.setting);
-
   // Face usability check (uses atomic face_visible/face_obstructed fields)
   const isUsableFace = (tags.face_visible === 'yes' && tags.face_obstructed === 'no' && tags.face_confidence !== 'low');
-
-  // Context-gate booleans: prevent unsupported setting nouns in skeletons
-  const _settingLc = (tags.setting || '').toLowerCase();
-  const _bgVibeLc  = (tags.bg_vibe || '').toLowerCase();
-  const _outfitLc  = (tags.outfit || '').toLowerCase();
-  const isOfficeLike = /office|corporate|desk|work/i.test(_settingLc) || _bgVibeLc === 'corporate';
-  const isGymLike    = /gym|fitness/i.test(_settingLc) || _outfitLc === 'gym clothes';
-
-  // Build selfie-attribute target pools: primary (personal) vs bgVibe
-  // Blend rule: if face is NOT usable, exclude hair/expression/grooming/pose as primary targets
-  const _primaryPool = new Set();
-  const _bgVibePool = new Set();
-  const _faceGatedFields = new Set(['hair', 'expression', 'grooming', 'pose']);
-  if (isKnownTag(tags.hair) && isUsableFace)       { _primaryPool.add('hair'); _primaryPool.add(tags.hair + ' hair'); }
-  if (isKnownTag(tags.outfit))                      { _primaryPool.add('outfit'); _primaryPool.add(tags.outfit + ' fit'); }
-  if (isKnownTag(tags.expression) && isUsableFace) { _primaryPool.add('expression'); _primaryPool.add(tags.expression + ' look'); }
-  if (isKnownTag(tags.pose) && isUsableFace)       { _primaryPool.add('pose'); _primaryPool.add(tags.pose + ' pose'); }
-  if (isKnownTag(tags.grooming) && isUsableFace)   { _primaryPool.add('grooming'); _primaryPool.add(tags.grooming + ' grooming'); }
-  if (isKnownTag(tags.bg_vibe))    { _bgVibePool.add(tags.bg_vibe + ' vibe'); }
-  // Generic personal anchors: when clothing/hair is visible, add at most 2 generic outfit anchors
-  if (tags.outfit_visible === 'yes') {
-    const shuffled = [...GENERIC_OUTFIT_ANCHORS].sort(() => Math.random() - 0.5);
-    for (const a of shuffled.slice(0, 2)) _primaryPool.add(a);
-  }
-  if (tags.hair_visible === 'yes' && isUsableFace) {
-    for (const a of GENERIC_HAIR_ANCHORS) _primaryPool.add(a);
-  }
-  const selfieAttrPrimary = [..._primaryPool];
-  const selfieAttrBgVibe = [..._bgVibePool];
-  const selfieAttrTargets = [...selfieAttrPrimary, ...selfieAttrBgVibe];
   if (isDev) console.log(`[nuclear-v2] isUsableFace=${isUsableFace} face_visible=${tags.face_visible} face_obstructed=${tags.face_obstructed} face_confidence=${tags.face_confidence} person_present=${tags.person_present} outfit_visible=${tags.outfit_visible} hair_visible=${tags.hair_visible}`);
 
-  // Two-pool picker: <=15% bgVibe when primary exists
-  function nv2PickWeightedSelfieAttr(recentList) {
-    const avoidSet = new Set(recentList.slice(-NV2_AVOID_LAST_N));
-    let pool;
-    if (selfieAttrPrimary.length > 0 && selfieAttrBgVibe.length > 0) {
-      pool = Math.random() < 0.87 ? selfieAttrPrimary : selfieAttrBgVibe;
-    } else {
-      pool = selfieAttrTargets;
-    }
-    const candidates = pool.filter(t => !avoidSet.has(t));
-    const pick = candidates.length > 0 ? candidates : pool;
-    return pick[Math.floor(Math.random() * pick.length)];
+  // ===== PHASE 1: Freeform candidate generation =====
+  // Build details block for freeform prompt
+  const detailParts = [];
+  if (isKnownTag(tags.lighting)) detailParts.push(`lighting: ${tags.lighting}`);
+  if (isKnownTag(tags.setting)) detailParts.push(`setting: ${tags.setting}`);
+  if (isKnownTag(tags.outfit) && tags.outfit_visible === 'yes') detailParts.push(`outfit: ${tags.outfit}`);
+  if (isKnownTag(tags.expression) && isUsableFace) detailParts.push(`expression: ${tags.expression}`);
+  if (isKnownTag(tags.hair) && isUsableFace) detailParts.push(`hair: ${tags.hair}`);
+  if (isKnownTag(tags.pose) && isUsableFace) detailParts.push(`pose: ${tags.pose}`);
+  if (isKnownTag(tags.grooming) && isUsableFace) detailParts.push(`grooming: ${tags.grooming}`);
+  if (isKnownTag(tags.bg_vibe)) detailParts.push(`vibe: ${tags.bg_vibe}`);
+  if (isKnownTag(tags.angle)) detailParts.push(`angle: ${tags.angle}`);
+  if (isKnownTag(tags.framing)) detailParts.push(`framing: ${tags.framing}`);
+  if (tags.objects.length > 0) detailParts.push(`objects: ${tags.objects.slice(0, 6).join(', ')}`);
+  if (filteredSceneTargets.length > 0) detailParts.push(`scene: ${filteredSceneTargets.slice(0, 4).join(', ')}`);
+  const detailsBlock = `Visible details: [${detailParts.join('; ')}]`;
+
+  // Build anchor lists for validation
+  const detailAnchors = [
+    ...detailParts.map(p => p.split(': ').slice(1).join(': ')).filter(Boolean),
+    ...tags.objects.slice(0, 6),
+    ...filteredSceneTargets.slice(0, 4),
+  ].map(s => s.toLowerCase().trim()).filter(s => s.length >= 3 && s !== 'unknown');
+  // Dedupe
+  const detailAnchorSet = [...new Set(detailAnchors)];
+  // Split compound anchors ("car hood" → also "car", "hood")
+  const expandedAnchors = [];
+  for (const a of detailAnchorSet) {
+    expandedAnchors.push(a);
+    if (a.includes(' ')) a.split(' ').filter(w => w.length >= 3).forEach(w => expandedAnchors.push(w));
   }
-  if (isDev && selfieAttrTargets.length > 0) {
-    console.log(`[nuclear-v2] selfieAttrTargets primary=${selfieAttrPrimary.length} bgVibe=${selfieAttrBgVibe.length} total=${selfieAttrTargets.length}`);
+  const finalDetailAnchors = [...new Set(expandedAnchors)];
+
+  // Detail pack minimum guarantee: ensure ≥3 usable anchors even when tags are weak
+  if (finalDetailAnchors.length < 3) {
+    const fallbackTerms = [tags.setting, tags.angle, tags.lighting, tags.framing, tags.bg_vibe, tags.pose]
+      .map(v => v && typeof v === 'string' ? v.toLowerCase().trim() : null)
+      .filter(v => v && v.length >= 3 && v !== 'unknown' && !finalDetailAnchors.includes(v));
+    for (const t of fallbackTerms) {
+      if (finalDetailAnchors.length >= 3) break;
+      finalDetailAnchors.push(t);
+    }
+    if (isDev && finalDetailAnchors.length < 3) console.log(`[nuclear-v2] detailPackWeak=true anchors=${finalDetailAnchors.length}`);
   }
 
-  // Build modifier phrase from selfie tags (always pick up to 2 parts)
-  const modifierParts = [tags.angle, tags.lighting, tags.framing, tags.pose, tags.setting].map(cleanTagToken).filter(Boolean);
-  const hasHighPriorityModifier = !!(isKnownTag(tags.framing) || isKnownTag(tags.lighting));
-  let modifierPhrase = null;
-  if (modifierParts.length > 0) {
-    // If framing or lighting present, always include at least one of them
-    let picked = [];
-    if (hasHighPriorityModifier) {
-      const priority = [tags.framing, tags.lighting].map(cleanTagToken).filter(Boolean);
-      picked.push(priority[Math.floor(Math.random() * priority.length)]);
-      const remaining = modifierParts.filter(p => p !== picked[0]);
-      if (remaining.length > 0) {
-        picked.push(remaining[Math.floor(Math.random() * remaining.length)]);
-      }
-    } else {
-      const shuffled = [...modifierParts].sort(() => Math.random() - 0.5);
-      picked = shuffled.slice(0, 2);
-    }
-    modifierPhrase = picked.join(', ');
+  // Scene anchors: dynamic from tagger output, with generic-term stoplist
+  const NV2_GENERIC_SCENE_STOP = new Set(['wall', 'floor', 'ceiling', 'room', 'door', 'window', 'background', 'surface', 'space', 'area', 'corner', 'side', 'thing', 'stuff', 'item', 'object', 'place']);
+  const rawScenePool = [
+    ...(isKnownTag(tags.setting) ? [tags.setting.toLowerCase()] : []),
+    ...filteredSceneTargets.slice(0, 4).map(s => s.toLowerCase()),
+    ...tags.objects.slice(0, 6).map(s => s.toLowerCase()),
+  ];
+  const sceneAnchors = [...new Set(rawScenePool)].filter(s => s.length >= 3 && !NV2_GENERIC_SCENE_STOP.has(s));
+
+  // Generate 8 candidates in parallel
+  const rawCandidates = await nv2GenerateCandidates({ imageBase64, detailsBlock, n: 8 });
+
+  // Validate + score
+  const results = rawCandidates.map(raw => {
+    const cleaned = nv2SanitizeQuotes(nv2CleanOutput(raw));
+    const result = nv2ValidateCandidate(cleaned, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev });
+    return { text: cleaned, ...result };
+  });
+  const valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
+  const rejected = results.filter(r => !r.valid);
+
+  if (isDev) {
+    const rejectSummary = {};
+    rejected.forEach(r => { rejectSummary[r.reason] = (rejectSummary[r.reason] || 0) + 1; });
+    console.log(`[nuclear-v2] candidates=${rawCandidates.length} valid=${valid.length} rejected=${JSON.stringify(rejectSummary)}`);
+    if (valid.length > 0) console.log(`[nuclear-v2] winner score=${valid[0].score} text="${valid[0].text}"`);
   }
 
-  let lastAttemptOpenerType = null; // tracks opener across attempts within this request
-  while (attempts < maxAttempts) {
-    attempts++;
-
-    // 1. Decide template pool:
-    //    - If framing or lighting tags exist → always use modifier template
-    //    - If any modifier phrase exists → 75% chance modifier template
-    //    - Else → standard templates
-    //    - Never MODIFIER twice in a row (across requests OR across attempts)
-    const forceModifier = modifierPhrase && hasHighPriorityModifier;
-    const lastOpener = state.recentOpenerTypes.length > 0 ? state.recentOpenerTypes[state.recentOpenerTypes.length - 1] : null;
-    const modifierBlockedByPrevAttempt = lastAttemptOpenerType === 'MODIFIER';
-    if (modifierBlockedByPrevAttempt && isDev) console.log(`[nuclear-v2] forcing standard pool (prev attempt was MODIFIER)`);
-    const useModifierTpl = modifierPhrase && (forceModifier || Math.random() < 0.75) && lastOpener !== 'MODIFIER' && !modifierBlockedByPrevAttempt;
-
-    let structure;
-    if (useModifierTpl) {
-      // Pick from modifier templates with avoidance
-      structure = nv2SelectWithAvoidance(NV2_MODIFIER_TEMPLATES, state.recentStructures, NV2_MAX_SELECT_TRIES);
-    } else {
-      // Select structure with weighted scoring + opener diversity + 2-sentence bias
-      //    ~80% chance pick from 2-sentence templates, 20% allow any
-      const prefer2Sent = Math.random() < 0.8;
-      const structPool = prefer2Sent
-        ? NV2_STRUCTURE_TEMPLATES.filter(t => NV2_TWO_SENTENCE_IDS.has(t.id))
-        : NV2_STRUCTURE_TEMPLATES;
-      const effectivePool = structPool.length > 0 ? structPool : NV2_STRUCTURE_TEMPLATES;
-
-      const avoidOpeners = new Set(state.recentOpenerTypes.slice(-2));
-      const avoidStructs = new Set(state.recentStructures.slice(-NV2_AVOID_LAST_N));
-      structure = null;
-      for (let t = 0; t < 10; t++) {
-        const candidate = nv2WeightedStructurePick(effectivePool, avoidStructs);
-        const ot = nv2GetOpenerType(candidate.tpl);
-        if (!avoidOpeners.has(ot) || t === 9) {
-          structure = candidate;
-          break;
-        }
-      }
-      if (!structure) structure = nv2WeightedStructurePick(effectivePool, new Set());
-    }
-
-    // 1b. Target selection — 4-tier with selfie attr bias when available
-    //    selfieAttrTargets non-empty: 55% selfie attr, 20% scene, 15% tags, 10% base
-    //    selfieAttrTargets empty:     45% scene, 35% tags, 20% base (original)
-    let target;
-    targetSource = 'base';
-    targetFromScene = false;
-    const roll = Math.random();
-    const hasSelfieAttrs = selfieAttrTargets.length > 0;
-    const primaryCount = selfieAttrPrimary.length;
-    if (hasSelfieAttrs && roll < 0.55) {
-      target = nv2PickWeightedSelfieAttr(state.recentTargets);
-      targetSource = 'selfie_attr';
-    } else if (filteredSceneTargets.length > 0 && roll < (hasSelfieAttrs ? 0.75 : 0.45)) {
-      target = nv2SelectWithAvoidance(filteredSceneTargets, state.recentTargets, NV2_MAX_SELECT_TRIES);
-      targetSource = 'scene';
-      targetFromScene = true;
-    } else if (tags.objects.length > 0 && roll < (hasSelfieAttrs ? 0.90 : 0.80)) {
-      target = nv2SelectWithAvoidance(tagDynamicTargets, state.recentTargets, NV2_MAX_SELECT_TRIES);
-      targetSource = 'tags';
-      targetFromScene = true;
-    } else {
-      target = nv2SelectWithAvoidance(NV2_TARGET_BUCKET, state.recentTargets, NV2_MAX_SELECT_TRIES);
-    }
-    // 1b2. Block "lighting choice" when primary selfie attrs exist
-    if (target.toLowerCase() === 'lighting choice' && primaryCount > 0) {
-      if (isDev) console.log(`[nuclear-v2] targetBlocked=lighting choice reason=primarySelfieAttrsPresent primaryCount=${primaryCount}`);
-      target = nv2PickWeightedSelfieAttr(state.recentTargets);
-      targetSource = 'selfie_attr';
-    }
-    // 1b3. Graphic-tee rotation: avoid consecutive outfit targets when last was "graphic tee"
-    if (tags.outfit === 'graphic tee' && /\b(outfit|fit|graphic tee)\b/i.test(target)) {
-      if (lastNuclearTargetCategory === 'outfit' || lastNuclearFinalText.toLowerCase().includes('graphic tee')) {
-        // Prefer non-outfit selfie attrs, then scene, then keep
-        const nonOutfitAttrs = selfieAttrTargets.filter(t => !/\b(outfit|fit|graphic tee)\b/i.test(t));
-        if (nonOutfitAttrs.length > 0) {
-          target = nonOutfitAttrs[Math.floor(Math.random() * nonOutfitAttrs.length)];
-          targetSource = 'selfie_attr';
-          if (isDev) console.log(`[nuclear-v2] graphicTeeRotation: switched to "${target}"`);
-        } else if (filteredSceneTargets.length > 0) {
-          target = nv2SelectWithAvoidance(filteredSceneTargets, state.recentTargets, NV2_MAX_SELECT_TRIES);
-          targetSource = 'scene';
-          if (isDev) console.log(`[nuclear-v2] graphicTeeRotation: switched to scene "${target}"`);
-        }
-      }
-    }
-    // 1c. Non-roastable target guard: re-pick if target is environment-only
-    if (NV2_NON_ROASTABLE_TARGETS.has(target.toLowerCase())) {
-      if (isDev) console.log(`[nuclear-v2] nonRoastableTargetFiltered=true target="${target}"`);
-      if (selfieAttrTargets.length > 0) {
-        target = nv2PickWeightedSelfieAttr(state.recentTargets);
-        targetSource = 'selfie_attr';
-      } else {
-        const roastableTagObjects = tags.objects.filter(o => !NV2_NON_ROASTABLE_TARGETS.has(o.toLowerCase()));
-        if (roastableTagObjects.length > 0) {
-          target = nv2SelectWithAvoidance(roastableTagObjects, state.recentTargets, NV2_MAX_SELECT_TRIES);
-          targetSource = 'tags';
-        } else {
-          target = nv2SelectWithAvoidance(NV2_TARGET_BUCKET, state.recentTargets, NV2_MAX_SELECT_TRIES);
-          targetSource = 'base';
-          targetFromScene = false;
-        }
-      }
-    }
-    // 1d. Context-only object guard: re-pick if target is clutter that shouldn't be the main subject
-    if (NV2_CONTEXT_ONLY_OBJECTS.has(target.toLowerCase()) && (targetSource === 'scene' || targetSource === 'tags')) {
-      if (isDev) console.log(`[nuclear-v2] contextOnlyTargetFiltered=true target="${target}"`);
-      const usableTagObjects = tags.objects.filter(o =>
-        !NV2_CONTEXT_ONLY_OBJECTS.has(o.toLowerCase()) && !NV2_NON_ROASTABLE_TARGETS.has(o.toLowerCase())
-      );
-      const sceneAllowable = ['monitor', 'keyboard', 'car', 'laptop', 'phone', 'headphones', 'microphone'];
-      const usableScene = filteredSceneTargets.filter(o =>
-        !NV2_CONTEXT_ONLY_OBJECTS.has(o.toLowerCase()) && !NV2_NON_ROASTABLE_TARGETS.has(o.toLowerCase())
-      );
-      if (usableTagObjects.length > 0) {
-        target = nv2SelectWithAvoidance(usableTagObjects, state.recentTargets, NV2_MAX_SELECT_TRIES);
-        targetSource = 'tags';
-      } else if (usableScene.length > 0) {
-        target = nv2SelectWithAvoidance(usableScene, state.recentTargets, NV2_MAX_SELECT_TRIES);
-        targetSource = 'scene';
-      } else {
-        target = nv2SelectWithAvoidance(NV2_TARGET_BUCKET, state.recentTargets, NV2_MAX_SELECT_TRIES);
-        targetSource = 'base';
-        targetFromScene = false;
-      }
-    }
-    // 1e. Pose-specific target guard: only use pose-specific targets when pose is known
-    //     Exception: allow generic "tilt" targets when angle is tilted/off-center
-    if (NV2_POSE_SPECIFIC_TARGETS.has(target.toLowerCase()) && !isKnownTag(tags.pose)) {
-      const angleLc = (tags.angle || '').toLowerCase();
-      const isTiltAngle = angleLc.includes('tilt') || angleLc.includes('off-center');
-      const isTiltTarget = target.toLowerCase() === 'head tilt';
-      if (!(isTiltAngle && isTiltTarget)) {
-        if (isDev) console.log(`[nuclear-v2] poseSpecificBlocked=true target="${target}" pose=${tags.pose}`);
-        // Replace with generic "pose"
-        target = 'pose';
-        targetSource = 'base';
-      }
-    }
-    // 1f. Context-gated target guard: block setting-specific targets when setting doesn't match
-    const _targetLc = target.toLowerCase();
-    if (_targetLc === 'gym selfie' && !isGymLike) {
-      target = 'selfie technique';
-      if (isDev) console.log(`[nuclear-v2] contextTargetBlocked="gym selfie" -> "selfie technique"`);
-    }
-    if ((_targetLc === 'office chair' || _targetLc === 'zoom') && !isOfficeLike) {
-      target = 'setup';
-      if (isDev) console.log(`[nuclear-v2] contextTargetBlocked="${_targetLc}" -> "setup"`);
-    }
-
-    const critique = NV2_CRITIQUE_BUCKET[Math.floor(Math.random() * NV2_CRITIQUE_BUCKET.length)];
-    const escalation = NV2_ESCALATION_BUCKET[Math.floor(Math.random() * NV2_ESCALATION_BUCKET.length)];
-
-    pickedStructure = structure;
-    pickedTarget = target;
-    pickedOpenerType = useModifierTpl ? 'MODIFIER' : nv2GetOpenerType(structure.tpl);
-    lastAttemptOpenerType = pickedOpenerType;
-    modifierUsed = useModifierTpl ? modifierPhrase : null;
-
-    // 2. Pick social context (before skeleton so {SOCIAL} can be injected)
-    const socialContext = nv2PickSocialContext(clientId);
-    if (isDev) console.log(`[nuclear-v2] socialContext="${socialContext}"`);
-
-    // 2a. Assemble skeleton
-    let skeleton = structure.tpl
-      .replace('{TARGET}', target)
-      .replace('{CRITIQUE}', critique)
-      .replace('{ESCALATION}', escalation)
-      .replace('{MODIFIER}', modifierPhrase || target)
-      .replace(/\{SOCIAL\}/g, socialContext);
-
-    // 2a1b. Context-gate skeleton nouns: strip unsupported setting references
-    if (!isGymLike) {
-      skeleton = skeleton.replace(/\bgym selfie\b/gi, 'selfie').replace(/\bgym photo\b/gi, 'photo');
-    }
-    if (!isOfficeLike) {
-      skeleton = skeleton.replace(/\bZoom\b/g, 'room').replace(/\bmeeting\b/gi, 'room');
-    }
-
-    // 2a2. Scene punchline injection: if target comes from scene or setting matches,
-    //       50% chance to splice a punchline fragment into sentence 1
-    punchlineUsed = false;
-    punchlineText = null;
-    const settingLower = (tags.setting || '').toLowerCase();
-    const triggerPunchline = targetSource === 'scene' ||
-      settingLower.includes('garage') || settingLower.includes('outdoor') || settingLower.includes('office');
-    if (triggerPunchline && Math.random() < 0.5) {
-      // Find matching punchlines: check target, then setting
-      const targetLower = target.toLowerCase();
-      let punchlines = NV2_SCENE_PUNCHLINES[targetLower] || null;
-      if (!punchlines) {
-        for (const key of Object.keys(NV2_SCENE_PUNCHLINES)) {
-          if (targetLower.includes(key) || settingLower.includes(key)) {
-            punchlines = NV2_SCENE_PUNCHLINES[key];
-            break;
-          }
-        }
-      }
-      if (punchlines && punchlines.length > 0) {
-        const frag = punchlines[Math.floor(Math.random() * punchlines.length)];
-        // Inject fragment into end of sentence 1 (before the period)
-        const skelSents = skeleton.match(/[^.!?]*[.!?]+/g);
-        if (skelSents && skelSents.length >= 1) {
-          const s1Base = skelSents[0].replace(/[.!?]+$/, '').trim();
-          const rest = skelSents.slice(1).map(s => s.trim()).join(' ');
-          skeleton = s1Base + ' \u2014 ' + frag + '.' + (rest ? ' ' + rest : '');
-        } else {
-          skeleton = skeleton.replace(/[.!?]+$/, '').trim() + ' \u2014 ' + frag + '.';
-        }
-        punchlineUsed = true;
-        punchlineText = frag;
-        if (isDev) console.log(`[nuclear-v2] punchlineInjected="${frag}" target="${target}" setting="${tags.setting || 'none'}"`);
-      }
-    }
-
-    // 2b. Pre-rewrite skeleton length check: if skeleton is extremely short (<10 words),
-    //     append an escalation fragment BEFORE sending to rewriter to avoid refusal on tiny input
-    let skeletonTooShortAdjusted = false;
-    const skeletonWc = skeleton.split(/\s+/).length;
-    if (skeletonWc < 10) {
-      const extraEsc = NV2_ESCALATION_BUCKET[Math.floor(Math.random() * NV2_ESCALATION_BUCKET.length)];
-      const base = skeleton.replace(/[.!?]+$/, '').trim();
-      skeleton = base + '. ' + extraEsc + '.';
-      skeletonTooShortAdjusted = true;
-      if (isDev) console.log(`[nuclear-v2] skeletonTooShortAdjusted=true (was ${skeletonWc} words, appended "${extraEsc}")`);
-    }
-
-    // 2c. Micdrop decision: always use a micdrop ending (nuclear = every roast gets one)
-    const micdropLane = nv2DetectMicdropLane(target, tags.setting, tags.angle, tags.lighting, tags.pose);
-    let chosenMicdrop = nv2SelectMicdrop(clientId, micdropLane);
-    // Fallback to nuclear meme pool if main pool returned a banned entry
-    if (!chosenMicdrop || nv2HasBannedPatterns(chosenMicdrop)) {
-      const nucPool = NV2_MICDROPS_NUCLEAR;
-      chosenMicdrop = nucPool[Math.floor(Math.random() * nucPool.length)];
-    }
-
-    if (isDev) console.log(`[nuclear-v2] attempt=${attempts} opener=${pickedOpenerType} micdrop=${chosenMicdrop ? '"' + chosenMicdrop + '"' : 'none'} skeleton="${skeleton}"`);
-
-    // 3. GPT polish (rewrite-only, no new ideas)
-    //    Build a facts block so the model stays faithful to extracted tags
-    const allowedObjects = [...filteredSceneTargets, ...tags.objects].map(cleanTagToken).filter(Boolean).slice(0, 8);
-    const selfieCalloutStr = [
-      isKnownTag(tags.hair) && isUsableFace       ? `hair: ${tags.hair}` : null,
-      isKnownTag(tags.outfit)                      ? `outfit: ${tags.outfit}` : null,
-      isKnownTag(tags.expression) && isUsableFace ? `expression: ${tags.expression}` : null,
-      isKnownTag(tags.pose) && isUsableFace       ? `pose: ${tags.pose}` : null,
-      isKnownTag(tags.grooming) && isUsableFace   ? `grooming: ${tags.grooming}` : null,
-      isKnownTag(tags.bg_vibe)                     ? `bg_vibe: ${tags.bg_vibe}` : null,
-    ].filter(Boolean).join(', ');
-    const factsBlock = `HARD CONSTRAINTS (do not contradict):\n- Target: "${target}"\n- Modifier: ${modifierUsed || 'none'}\n- Lighting: ${tags.lighting || 'unknown'}\n- Angle: ${tags.angle || 'unknown'}\n- Setting: ${tags.setting || 'unknown'}\n- SocialContext: "${socialContext}" (use THIS term for the status hit — do not substitute another)\n- SelfieCallouts: ${selfieCalloutStr || 'none'}\n- Allowed objects: [${allowedObjects.map(o => '"' + o + '"').join(', ')}]\nDo NOT contradict these facts (e.g. do not say "off-center" if modifier says "centered"; do not say "dark" if lighting is "bright"). Do NOT invent objects not in the allowed list. If SelfieCallouts are available, PREFER referencing one in the visual callout. If unsure, restate neutrally.`;
-
-    const NV2_POLISH_BANS = `Do NOT start with: "With that", "Your vibe", "Your expression", "It's giving". No softeners: kind of, maybe, a bit, low-key. No advice. No kindness. No questions. Do NOT reference body shape, weight, height, skin, facial features, or physical attributes. Roast CHOICES (hair style, outfit, expression, pose, grooming), not the person's body.`;
-
-    let polishPrompt;
-    const polishSystemMsg = 'You are a comedy caption copyeditor for a roast-humor app. Your ONLY job is to polish a draft caption into a punchy, shareable 2-sentence format. Write it like it will be screenshotted and posted publicly. Tone is blunt and confrontational. Remove explanatory phrasing. Prefer short, direct accusations over descriptive explanations. Be decisive. No hedging. No softness. Avoid soft language like: "would", "kind of", "maybe", "a bit", "was a bold choice", "isn\'t the status hit you think it is". Do NOT use softeners like: bold choice, maybe, kind of, a bit, not your best, try, consider. Prefer accusatory framing: "You chose…", "You centered…", "You thought…". Sentence 1 should accuse the subject of a visible choice using at least one concrete detail from Facts. Sentence 1 MUST mention at least ONE concrete detail verbatim from the provided facts. Keep exactly 2 sentences total. Avoid these overused starters entirely: "You hit upload", "You really thought", "You posted", "Posted". Do not begin sentence 1 with "You hit upload" or "You really thought". You always produce output — you never refuse, apologize, or mention policies. Roast the photo, the styling choices, the pose, the effort — never the person\'s body, identity, or protected traits. Output EXACTLY 2 sentences, no quotes, no markdown, no explanation.';
-    if (chosenMicdrop) {
-      // Extract first sentence from skeleton to form the rewrite input
-      const skelSents = skeleton.match(/[^.!?]*[.!?]+/g);
-      const sent1 = skelSents ? skelSents[0].trim() : skeleton.replace(/[.!?]+$/, '').trim() + '.';
-      polishPrompt = `Polish sentence 1 into a shareable, punchy line. Keep the same idea — just make it land harder.\n\nRules:\n- Output EXACTLY 2 sentences.\n- Sentence 1: Directly accuse a visible choice in the photo. Imply a bad decision. Be confident and decisive. No metaphors. No hedging. Include ONE visible detail from the facts.\n  BAD patterns (NEVER use): "You look like…", "Looking like…", any simile or metaphor comparison.\n- Sentence 2: Keep EXACTLY as provided — do NOT change, remove, or paraphrase it.\n- Tone must feel final and confident. Do not sound playful. Do not sound friendly. Do not offer improvement advice.\n- Roast the photo/choices/presentation, NOT the person\'s body or identity.\n- No slurs, no protected-trait attacks, no threats, no violence.\n- NEVER refuse or apologize.\n\n${NV2_POLISH_BANS}\n\n${factsBlock}\nPick one detail from Facts and say it plainly in sentence 1.\n\nDraft sentence 1: "${sent1}"\nSentence 2 (keep verbatim): "${chosenMicdrop}"`;
-    } else {
-      polishPrompt = `Polish this draft into a shareable, punchy 2-sentence caption.\n\nRules:\n- Output EXACTLY 2 sentences.\n- Sentence 1: Directly accuse a visible choice in the photo. Imply a bad decision. Be confident and decisive. No metaphors. No hedging. Include ONE visible detail from the facts.\n  BAD patterns (NEVER use): "You look like…", "Looking like…", any simile or metaphor comparison.\n- Sentence 2: 2–4 words. Cold micdrop. Declarative. No questions. No emojis.\n- Tone must feel final and confident. Do not sound playful. Do not sound friendly. Do not offer improvement advice.\n- Roast the photo/choices/presentation, NOT the person\'s body or identity.\n- No slurs, no protected-trait attacks, no threats, no violence.\n- NEVER refuse or apologize.\n\n${NV2_POLISH_BANS}\n\n${factsBlock}\nPick one detail from Facts and say it plainly in sentence 1.\n\nDraft roast: "${skeleton}"`;
-    }
-
-    let polished = chosenMicdrop
-      ? skeleton.replace(/[.!?]+$/, '').trim() + '. ' + chosenMicdrop
-      : skeleton; // fallback to skeleton if LLM fails
-    let polishFailed = false;
-    const polishOpts = {
-      model: 'gpt-4o',
-      input: [
-        { role: 'system', content: polishSystemMsg },
-        {
-          role: 'user',
-          content: [
-            { type: 'input_text', text: polishPrompt },
-            { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
-          ],
-        },
-      ],
-      max_output_tokens: 80,
-      temperature: 0.7,
-      top_p: 0.92,
-    };
-    const POLISH_TIMEOUT_MS = 15000;
-    try {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), POLISH_TIMEOUT_MS);
-      const polishResp = await openai.responses.create(polishOpts, { signal: ac.signal });
-      clearTimeout(timer);
-      if (polishResp.output_text) {
-        polished = polishResp.output_text;
-        if (process.env.DEBUG_NUCLEAR_RAW === '1') {
-          console.log('[nuclear-v2] RAW_MODEL_OUTPUT:', polished);
-        }
-        // B) If raw output is already valid nuclear, skip all downstream rewrites
-        if (isRawAcceptableNuclear(polished, { tags, target, selfieAttrTargets, sceneTargets: filteredSceneTargets, modifierPhrase })) {
-          const rawCleaned = nv2SanitizeQuotes(nv2CleanOutput(polished));
-          if (!isRecentNuclearRepeat(rawCleaned)) {
-            finalRoast = rawCleaned;
-            wordCount = finalRoast.split(/\s+/).length;
-            if (isDev) console.log(`[nuclear-v2] rawAccepted=true, skipping pipeline, words=${wordCount}`);
-            break; // skip all toneFix, objectSubjectRewrite, micdropBrevity, trims
-          } else {
-            if (isDev) console.log('[nuclear-v2] rawAccepted=true but repeatCheck failed, falling through to pipeline');
-          }
-        }
-      }
-    } catch (err) {
-      if (isDev) console.log(`[nuclear-v2] polish LLM error: ${err.message}`);
-      // One quick retry for transient/connection errors (not 4xx content errors)
-      const isTransient = err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' ||
-        err.name === 'AbortError' || (err.status && err.status >= 500);
-      if (err.name === 'AbortError') {
-        console.log(`[nuclear-v2] polishAbort=true timeoutMs=${POLISH_TIMEOUT_MS}`);
-      }
-      if (isTransient) {
-        try {
-          console.log(`[nuclear-v2] polishRetryNoImage=true`);
-          const retryPrompt = `Rewrite this roast. SocialContext: "${socialContext}". Target: "${target}". SelfieCallouts: ${selfieCalloutStr || 'none'}.\n${factsBlock}\nRoast: "${skeleton}"\nOutput exactly 2 sentences. Never refuse. Google Play safe.`;
-          const retryOpts = {
-            model: 'gpt-4o',
-            input: [
-              { role: 'system', content: polishSystemMsg },
-              { role: 'user', content: retryPrompt },
-            ],
-            temperature: 0.35,
-            max_output_tokens: 65,
-          };
-          const ac2 = new AbortController();
-          const timer2 = setTimeout(() => ac2.abort(), 10000);
-          const retryResp = await openai.responses.create(retryOpts, { signal: ac2.signal });
-          clearTimeout(timer2);
-          if (retryResp.output_text) {
-            polished = retryResp.output_text;
-          } else {
-            polishFailed = true;
-          }
-        } catch (retryErr) {
-          if (isDev) console.log(`[nuclear-v2] polish retry failed: ${retryErr.message}`);
-          polishFailed = true;
-        }
-      } else {
-        polishFailed = true;
-      }
-    }
-
-    // 4. Clean output (enforce 1–2 sentences) + sanitize quotes
-    let result = nv2SanitizeQuotes(nv2CleanOutput(polished));
-    if (isDev) console.log('[nuclear-v2] POLISH_RAW:', polished);
-    if (isDev) console.log('[nuclear-v2] POLISH_CLEAN:', result);
-
-    // 4-pre. Context-gate polished output: strip unsupported setting nouns the LLM may have invented
-    if (!isGymLike)    result = result.replace(/\bgym selfie\b/gi, 'selfie').replace(/\bgym photo\b/gi, 'photo');
-    if (!isOfficeLike) result = result.replace(/\bZoom\b/g, 'room').replace(/\bmeeting\b/gi, 'room');
-
-    // 4a-pre. Verb tightening: replace soft expression/pose verbs
-    result = result.replace(/\bnail(ed|ing) the (blank|deadpan|bored|confused|smug|forced|intense|zoned out|awkward) (expression|look|stare|face)\b/gi,
-      (_, verb, adj, noun) => `committed to that ${adj} ${noun}`);
-    result = result.replace(/\bnail(ed|ing) the (stiff|forced casual|over-serious|trying-to-look-cool|deadpan) (pose)\b/gi,
-      (_, verb, adj, noun) => `locked in that ${adj} ${noun}`);
-
-    // 4a. Tone fix: "Looking like" -> accusatory rewrite at sentence 1 start
-    if (/^Looking like\b/i.test(result)) {
-      result = result.replace(/^Looking like\b/i, 'You showed up looking like');
-      if (isDev) console.log(`[nuclear-v2] toneFixApplied=looking-like->showed-up`);
-    }
-    // 4a-extra. Block "You look like" comparisons — rewrite to accusatory
-    if (/^You look like\b/i.test(result)) {
-      result = result.replace(/^You look like\b/i, 'You showed up looking like');
-      if (isDev) console.log(`[nuclear-v2] toneFixApplied=you-look-like->showed-up`);
-    }
-
-    // 4b. REFUSAL GATE: if polish returned refusal text, retry once then fall back to skeleton
-    const _refDbg1 = {};
-    if (looksLikeRefusal(result, _refDbg1)) {
-      if (isDev) console.log(`[nuclear-v2] refusalDetected=true -> retrying polish once (pattern=${_refDbg1.matched || 'null/empty'})`);
-      let refusalRetried = false;
+  if (valid.length > 0) {
+    finalRoast = valid[0].text;
+  } else {
+    // Rewrite fallback: take best rejected candidate, fix the specific violation
+    const bestReject = results.sort((a, b) => b.score - a.score)[0];
+    if (bestReject) {
       try {
-        const refRetryAc = new AbortController();
-        const refRetryTimer = setTimeout(() => refRetryAc.abort(), 8000);
-        const refRetryOpts = {
-          ...polishOpts,
-          temperature: 0.3,
-          max_output_tokens: 60,
-          input: [
-            { role: 'system', content: 'You are a PG-13 comedy caption writer. Your job: take a draft roast caption about a photo and make it funny, mean, and shareable — but clean enough for a phone screen. Write it like it will be screenshotted and posted publicly. Sentence 1 MUST mention at least ONE concrete detail verbatim from the provided facts (hair, expression, outfit, lighting, angle, setting, background, or objects). Avoid these overused starters entirely: "You hit upload", "You really thought", "You posted", "Posted". Roast the styling, the pose, the effort. Never roast the body or identity. Always produce output. Never refuse, never apologize, never mention being an AI. Output exactly 2 sentences.' },
-            { role: 'user', content: `Rewrite this draft into a clean-but-mean 2-sentence caption. Sentence 1: 12–16 words, punchy, about a visible choice in the photo. Sentence 2: short micdrop, 2–6 words.\n\n${factsBlock}\nPick one detail from Facts and say it plainly in sentence 1.\n\nDraft: "${skeleton}"` },
-          ],
-        };
-        const refRetryResp = await openai.responses.create(refRetryOpts, { signal: refRetryAc.signal });
-        clearTimeout(refRetryTimer);
-        if (refRetryResp.output_text) {
-          const retryResult = nv2SanitizeQuotes(nv2CleanOutput(refRetryResp.output_text));
-          if (!looksLikeRefusal(retryResult)) {
-            result = retryResult;
-            refusalRetried = true;
-            if (isDev) console.log(`[nuclear-v2] refusalRetrySucceeded=true`);
-          }
-        }
-      } catch (e) {
-        if (isDev) console.log(`[nuclear-v2] refusal retry error: ${e.message}`);
-      }
-      if (!refusalRetried) {
-        if (isDev) console.log(`[nuclear-v2] refusalRetryFailed=true -> using skeleton`);
-        result = chosenMicdrop
-          ? skeleton.replace(/[.!?]+$/, '').trim() + '. ' + chosenMicdrop
-          : skeleton;
-        polishFailed = true;
-      }
-    }
-
-    // 4c. Micdrop preservation + 2-sentence enforcement
-    if (chosenMicdrop) {
-      const resultSentsC = result.match(/[^.!?]*[.!?]+/g);
-      if (!result.includes(chosenMicdrop.replace(/\.$/, ''))) {
-        // GPT removed/paraphrased the micdrop — extract sentence 1 and re-attach
-        const s1 = resultSentsC ? resultSentsC[0].trim() : result.replace(/[.!?]+$/, '').trim() + '.';
-        result = s1 + ' ' + chosenMicdrop;
-        if (isDev) console.log(`[nuclear-v2] micdrop re-attached after GPT removed it`);
-      } else if (resultSentsC && resultSentsC.length > 2) {
-        // GPT kept micdrop but added extra sentences — enforce exactly 2 (sent1 + micdrop)
-        const s1 = resultSentsC[0].trim();
-        result = s1 + ' ' + chosenMicdrop;
-        if (isDev) console.log(`[nuclear-v2] 2-sentence enforcement: trimmed ${resultSentsC.length} sentences to 2`);
-      }
-      micdropUsed = true;
-      micdropText = chosenMicdrop;
-    }
-
-    // 4c2. (removed — softness now handled by s1IsSoft hard-gate in step 7a2)
-
-    // 4c3. Contradiction check: reject outputs that contradict extracted tags
-    const contradictionFacts = { modifier: modifierUsed, lighting: tags.lighting, setting: tags.setting, allowedObjects };
-    const contradictions = nv2ContradictsFacts(result, contradictionFacts);
-    if (contradictions) {
-      if (isDev) console.log(`[nuclear-v2] contradictionDetected=[${contradictions.join(',')}] result="${result}", regenerating`);
-      continue;
-    }
-
-    // 4d. Micdrop post-hoc: if no micdrop was pre-chosen but result has a weak sentence 2, replace it
-    if (!chosenMicdrop) {
-      const sents = result.match(/[^.!?]*[.!?]+/g);
-      if (sents && sents.length >= 2) {
-        const sent2 = sents[1].trim();
-        const sent2Lower = sent2.toLowerCase();
-        const sent2Wc = sent2.split(/\s+/).length;
-        const isWeak = sent2Wc > 10 ||
-          NV2_WEAK_SENTENCE2_WORDS.some(w => sent2Lower.includes(w));
-        if (isWeak) {
-          const replacementMicdrop = nv2SelectMicdrop(clientId, micdropLane);
-          result = sents[0].trim() + ' ' + replacementMicdrop;
-          micdropUsed = true;
-          micdropText = replacementMicdrop;
-          micdropReplacedSentence2 = true;
-          if (isDev) console.log(`[nuclear-v2] micdropReplacedSentence2=true weak="${sent2}" -> "${replacementMicdrop}"`);
-        }
-      }
-    }
-
-    // 5. Punch-length enforcement
-    truncationApplied = false;
-    minWordRetry = false;
-    const preferredMinWords = 14;
-    wordCount = result.split(/\s+/).length;
-
-    // 5a. Too long (>22 words): trim sentence 1 to fit with micdrop
-    if (wordCount > 22) {
-      if (micdropUsed && micdropText) {
-        // Keep micdrop, shorten sentence 1 via hard-trim
-        const sents = result.match(/[^.!?]*[.!?]+/g);
-        if (sents && sents.length >= 2) {
-          let s1 = sents[0].trim();
-          const micdropWc = micdropText.split(/\s+/).length;
-          const maxS1Words = 22 - micdropWc;
-          const s1Words = s1.split(/\s+/);
-          if (s1Words.length > maxS1Words) {
-            const candidate = s1Words.slice(0, maxS1Words).join(' ');
-            // Prefer cutting at last phrase boundary to avoid mid-phrase fragments
-            const lastDot = candidate.lastIndexOf('.');
-            const lastDash = candidate.lastIndexOf('\u2014');
-            const lastComma = candidate.lastIndexOf(',');
-            const lastSemi = candidate.lastIndexOf(';');
-            const bestCut = Math.max(lastDot, lastDash, lastComma, lastSemi);
-            if (bestCut > 10) {
-              s1 = candidate.slice(0, bestCut).trim();
-            } else {
-              s1 = candidate;
-            }
-            s1 = s1.replace(/[,;\u2014]+$/, '').trim();
-            if (!/[.!?]$/.test(s1)) s1 += '.';
-          }
-          result = s1 + ' ' + micdropText;
-          wordCount = result.split(/\s+/).length;
-          truncationApplied = true;
-          if (isDev) console.log(`[nuclear-v2] micdrop-aware trim: ${wordCount} words`);
-        }
-      } else {
-        try {
-          const shortenResp = await openai.responses.create({
-            model: 'gpt-4o',
-            input: [
-              { role: 'system', content: 'You shorten roasts. Output ONLY the shortened roast. No quotes, no explanation. 1–2 sentences, 12–22 words max.' },
-              { role: 'user', content: [{ type: 'input_text', text: `Shorten this roast to under 22 words while keeping the punch. Do NOT add new ideas. Output ONLY the roast.\n\n"${result}"` }] },
-            ],
-            max_output_tokens: 60,
-            temperature: 0.7,
-          });
-          if (shortenResp.output_text) {
-            const shortened = nv2SanitizeQuotes(nv2CleanOutput(shortenResp.output_text));
-            if (!looksLikeRefusal(shortened)) {
-              const swc = shortened.split(/\s+/).length;
-              if (swc <= 22 && swc >= 5 && !nv2HasBannedPatterns(shortened)) {
-                result = shortened;
-                wordCount = swc;
-                truncationApplied = true;
-                if (isDev) console.log(`[nuclear-v2] shorten-rewrite applied: ${wordCount} words`);
-              }
-            }
-          }
-        } catch (err) {
-          if (isDev) console.log(`[nuclear-v2] shorten-rewrite error: ${err.message}`);
-        }
-
-        // Hard-trim fallback: cut at last phrase boundary (., —, ,, ;)
-        wordCount = result.split(/\s+/).length;
-        if (wordCount > 22) {
-          const lastDot = result.lastIndexOf('.');
-          const lastDash = result.lastIndexOf('\u2014');
-          const lastComma = result.lastIndexOf(',');
-          const lastSemi = result.lastIndexOf(';');
-          const cutPoint = Math.max(lastDot, lastDash, lastComma, lastSemi);
-          if (cutPoint > 10) {
-            result = result.slice(0, cutPoint).replace(/[,;\u2014]+$/, '').trim();
-            if (!/[.!?]$/.test(result)) result += '.';
-            wordCount = result.split(/\s+/).length;
-            truncationApplied = true;
-            if (isDev) console.log(`[nuclear-v2] hard-trim applied: ${wordCount} words`);
-          }
-        }
-      }
-    }
-
-    // 5b. Too short (<10 words): expand sentence 1 only, then re-attach micdrop
-    wordCount = result.split(/\s+/).length;
-    if (wordCount < 10) {
-      minWordRetry = true;
-      // Extract sentence 1 for expansion (preserve micdrop separately)
-      const expandSents = result.match(/[^.!?]*[.!?]+/g);
-      const expandS1 = expandSents ? expandSents[0].trim() : result.replace(/[.!?]+$/, '').trim() + '.';
-      if (isDev) console.log(`[nuclear-v2] expandRewriteTriggered=true (${wordCount} words)`);
-      try {
-        const expandResp = await openai.responses.create({
+        const fixPrompt = `Fix this roast caption: "${bestReject.text}"\nProblem: ${bestReject.reason}.\n${detailsBlock}\nRules: exactly 2 sentences, 12-26 words, reference at least 2 visible details. No questions, emojis, or hashtags. Keep the voice. Output only the fixed caption.`;
+        const fixResp = await openai.responses.create({
           model: 'gpt-4o',
           input: [
-            { role: 'system', content: 'You expand short roast sentence 1 into a punchier, longer version. Output ONLY the single expanded sentence. No quotes, no explanation. 12–16 words. Must feel shareable and harsh. No questions.' },
-            { role: 'user', content: [{ type: 'input_text', text: `Make this sentence longer, meaner, and more quotable. Same target "${target}". Add a specific, cutting observation. 12–16 words, output ONLY the single sentence.\n\n"${expandS1}"` }] },
+            { role: 'system', content: 'Fix the caption per the instructions. Output only the result.' },
+            { role: 'user', content: [
+              { type: 'input_text', text: fixPrompt },
+              { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+            ]},
           ],
           max_output_tokens: 60,
-          temperature: 0.8,
+          temperature: 0.5,
         });
-        if (expandResp.output_text) {
-          let expandedS1 = nv2SanitizeQuotes(expandResp.output_text.trim().replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').replace(/^["'`]+|["'`]+$/g, ''));
-          const _refDbg2 = {};
-          if (looksLikeRefusal(expandedS1, _refDbg2)) {
-            if (isDev) console.log(`[nuclear-v2] refusalDetected=true after expand-rewrite pattern=${_refDbg2.matched || 'null/empty'}, regenerating`);
-            continue;
-          }
-          if (!/[.!?]$/.test(expandedS1)) expandedS1 += '.';
-          const ewc = expandedS1.split(/\s+/).length;
-          if (ewc >= 8 && ewc <= 18 && !nv2HasBannedPatterns(expandedS1)) {
-            // Rebuild result: expanded sentence 1 + micdrop (if exists)
-            result = micdropUsed && micdropText ? expandedS1 + ' ' + micdropText : expandedS1;
-            wordCount = result.split(/\s+/).length;
-            if (isDev) console.log(`[nuclear-v2] expand-rewrite applied: ${wordCount} words`);
-          }
+        const fixed = nv2SanitizeQuotes(nv2CleanOutput(fixResp.output_text || ''));
+        const fixResult = nv2ValidateCandidate(fixed, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev });
+        if (fixResult.valid) {
+          finalRoast = fixed;
+          if (isDev) console.log(`[nuclear-v2] rewriteFallback=success text="${fixed}"`);
         }
-      } catch (err) {
-        if (isDev) console.log(`[nuclear-v2] expand-rewrite error: ${err.message}`);
-      }
-
-      // Escalation append ONLY if still too short and no micdrop to help
-      wordCount = result.split(/\s+/).length;
-      if (wordCount < 10 && !looksLikeRefusal(result)) {
-        if (!micdropUsed) {
-          const shortMicdrop = nv2SelectMicdrop(clientId, micdropLane);
-          const base = result.replace(/[.!?]+$/, '').trim();
-          result = base + '. ' + shortMicdrop;
-          micdropUsed = true;
-          micdropText = shortMicdrop;
-        } else {
-          const shortEscalations = NV2_ESCALATION_BUCKET.filter(e => e.split(/\s+/).length <= 4);
-          if (shortEscalations.length > 0) {
-            const appendEsc = shortEscalations[Math.floor(Math.random() * shortEscalations.length)];
-            const base = result.replace(/[.!?]+$/, '').trim();
-            result = base + '. ' + appendEsc + '.';
-          }
-        }
-        wordCount = result.split(/\s+/).length;
-        if (isDev) console.log(`[nuclear-v2] short-text appended -> ${wordCount} words`);
-      } else if (wordCount < 10) {
-        if (isDev) console.log(`[nuclear-v2] refusalDetected=true short text, regenerating`);
-        continue;
+      } catch (e) {
+        if (isDev) console.log(`[nuclear-v2] rewriteFallback=error ${e.message}`);
       }
     }
-
-    // 6. Final refusal gate (catch any that slipped through)
-    const _refDbg3 = {};
-    if (looksLikeRefusal(result, _refDbg3)) {
-      if (isDev) console.log(`[nuclear-v2] refusalDetected=true at final gate pattern=${_refDbg3.matched || 'null/empty'}, regenerating`);
-      continue;
-    }
-
-    // 7. Validate
-    const _banDbg = {};
-    if (nv2HasBannedPatterns(result, _banDbg)) {
-      if (isDev) console.log(`[nuclear-v2] banned pattern detected="${_banDbg.matched}", retrying`);
-      continue;
-    }
-    if (!isPlaySafe(result)) {
-      if (isDev) console.log(`[nuclear-v2] play-safe filter triggered, retrying`);
-      continue;
-    }
-    // Identity disclaimer gate: retry if model produced a disclaimer instead of a roast
-    if (/i(?:'m| am) not sure who this is|i don'?t know who this is|not sure who this is|can'?t (?:tell|identify) who this is|i can'?t identify/i.test(result)) {
-      if (isDev) console.log(`[nuclear-v2] identityDisclaimer=true -> regenerating`);
-      continue;
-    }
-    if (nv2HasBrokenSentenceEnd(result)) {
-      // Auto-repair: trim dangling words from each sentence end, then ensure punctuation
-      const repairSents = result.match(/[^.!?]*[.!?]+/g);
-      if (repairSents) {
-        const repaired = repairSents.map(s => {
-          let t = s.trim();
-          // Strip dangling article/preposition before final punctuation
-          t = t.replace(/\s+\b(a|an|the|of|to|on|in|at|for|with|from|by|as)\s*([.!?])$/, '$2');
-          // Strip two-token dangling (prep + the)
-          t = t.replace(/\s+\b(on|in|at|of|to|for|with)\s+the\s*([.!?])$/, '$2');
-          return t;
-        });
-        result = repaired.join(' ');
-      }
-      // Ensure final punctuation
-      if (!/[.!?]$/.test(result)) result += '.';
-      if (isDev) console.log(`[nuclear-v2] brokenSentenceEndDetected=true -> repaired`);
-    }
-    // 7a. Soft-penalty check: retry once on attempt 1 if B-terms present, accept on 2+
-    const softPen = nv2SoftPenalty(result, isDev);
-    if (softPen < 0 && attempts === 1) {
-      if (isDev) console.log(`[nuclear-v2] softPenalty=${softPen} on attempt 1, retrying for cleaner output`);
-      continue;
-    }
-    if (softPen < 0 && isDev) {
-      console.log(`[nuclear-v2] softPenalty=${softPen} on attempt ${attempts}, accepting`);
-    }
-
-    // 7a2. Soft sentence-1 gate: block hedging/crutch openers
-    if (s1IsSoft(result)) {
-      if (isDev) console.log(`[nuclear-v2] softS1Blocked=true -> regenerating`);
-      continue;
-    }
-
-    // 7a2b. Hard anchor gate: sentence 1 must contain at least one anchor token from targets/tags
-    {
-      const anchorCandidates = [...filteredSceneTargets, ...selfieAttrTargets, ...modifierParts, pickedTarget].map(cleanTagToken).filter(Boolean);
-      const anchorS1 = getSentence1(result);
-      if (!nv2HasAnyAnchorToken(anchorS1, anchorCandidates)) {
-        if (isDev) console.log(`[nuclear-v2] anchorGateFailed=true -> regenerating`);
-        continue;
-      }
-    }
-
-    // 7a3. Global anti-repeat gate: block near-duplicates of recent nuclear roasts
-    if (isRecentNuclearRepeat(result)) {
-      if (isDev) console.log(`[nuclear-v2] globalRepeatBlocked=true -> regenerating (pool=${recentNuclearRoasts.length})`);
-      continue;
-    }
-
-    // 7b. Object-subject guard + tag-glued object guard
-    //     Detect when sentence 1 treats a scene object as the main subject, or glues tag
-    //     descriptors onto an object ("Your car's mixed, garage look...")
-    //     SKIP if polish already failed (don't cascade more LLM calls on connection issues)
-    if (!polishFailed) {
-      const resultSents7 = result.match(/[^.!?]*[.!?]+/g);
-      const sent1_7 = resultSents7 ? resultSents7[0].trim() : result;
-      const needsObjectSubjectFix = nv2Sentence1ObjectSubject(sent1_7, allowedObjects, targetSource);
-      const needsTagGlueFix = nv2HasTagGluedObject(result);
-      if (needsObjectSubjectFix || needsTagGlueFix) {
-        const guardName = needsObjectSubjectFix ? 'objectSubjectGuard' : 'tagGluedObjectDetected';
-        if (isDev) console.log(`[nuclear-v2] ${guardName}=true sent1="${sent1_7}"`);
-        // One rewrite retry to fix subject
-        try {
-          const subjAc = new AbortController();
-          const subjTimer = setTimeout(() => subjAc.abort(), 8000);
-          const fixSubjResp = await openai.responses.create({
-            model: 'gpt-4o',
-            input: [
-              { role: 'system', content: 'You rewrite roast captions so the PERSON is always the subject (YOU/YOUR). Do NOT start sentence 1 with "Your <object>", "The <object>", or "That <object>". Objects may appear only as comparison/context after YOU/YOUR. Keep the tone nuclear, punchy, Google Play safe.' },
-              { role: 'user', content: [{ type: 'input_text', text: `${factsBlock}\n\nRewrite sentence 1 only so it roasts the PERSON first (you/your). If an object is referenced, use it as comparison AFTER the person. Do not invent objects; use at most 1 allowed object. Keep sentence 2 EXACTLY unchanged if it is a micdrop. Output ONLY the corrected roast.\n\nCurrent roast: "${result}"` }] },
-            ],
-            max_output_tokens: 80,
-            temperature: 0.7,
-          }, { signal: subjAc.signal });
-          clearTimeout(subjTimer);
-          if (fixSubjResp && fixSubjResp.output_text) {
-            let fixed = nv2SanitizeQuotes(nv2CleanOutput(fixSubjResp.output_text));
-            // Re-enforce micdrop if needed
-            if (micdropUsed && micdropText && !fixed.includes(micdropText.replace(/\.$/, ''))) {
-              const fSents = fixed.match(/[^.!?]*[.!?]+/g);
-              const fS1 = fSents ? fSents[0].trim() : fixed.replace(/[.!?]+$/, '').trim() + '.';
-              fixed = fS1 + ' ' + micdropText;
-            }
-            // Fix awkward "<descriptor> in <location> won't/couldn't" → accusatory "You can't/couldn't hide your ..."
-            fixed = fixed.replace(/^([A-Z][a-z]+(?:\s+[a-z]+)*)\s+in\s+((?:a|the|that)\s+)?([a-z]+(?:\s+[a-z]+)*)\s+won['']t\b/i,
-              (_, desc, _art, loc) => `You can't hide your ${desc.toLowerCase()} in that ${loc}`);
-            fixed = fixed.replace(/^([A-Z][a-z]+(?:\s+[a-z]+)*)\s+in\s+((?:a|the|that)\s+)?([a-z]+(?:\s+[a-z]+)*)\s+couldn['']t\b/i,
-              (_, desc, _art, loc) => `You couldn't hide your ${desc.toLowerCase()} in that ${loc}`);
-
-            // Re-run contradiction + safety checks
-            const fixContradictions = nv2ContradictsFacts(fixed, contradictionFacts);
-            if (!looksLikeRefusal(fixed) && !nv2HasBannedPatterns(fixed) && isPlaySafe(fixed) && !fixContradictions && /\byou\b|\byour\b/i.test(fixed)) {
-              result = fixed;
-              wordCount = result.split(/\s+/).length;
-              if (isDev) console.log(`[nuclear-v2] objectSubjectRewrite applied`);
-            } else {
-              if (isDev) console.log(`[nuclear-v2] objectSubjectRewrite failed checks, regenerating`);
-              continue;
-            }
-          } else {
-            continue;
-          }
-        } catch (err) {
-          // On connection/timeout error, keep current text instead of cascading
-          if (isDev) console.log(`[nuclear-v2] objectSubjectRewrite error: ${err.message}, keeping current text`);
-        }
-      }
-    } else {
-      if (isDev) console.log(`[nuclear-v2] skipping objectSubjectGuard (polish failed)`);
-    }
-
-    // 8. FINAL micdrop enforcement: guarantee sentence 2 = micdrop verbatim
-    if (micdropUsed && micdropText) {
-      const finalSents = result.match(/[^.!?]*[.!?]+/g);
-      const finalS1 = finalSents ? finalSents[0].trim() : result.replace(/[.!?]+$/, '').trim() + '.';
-      if (!result.includes(micdropText.replace(/\.$/, ''))) {
-        result = finalS1 + ' ' + micdropText;
-        if (isDev) console.log(`[nuclear-v2] final micdrop enforcement: re-attached`);
-      } else if (finalSents && finalSents.length > 2) {
-        result = finalS1 + ' ' + micdropText;
-        if (isDev) console.log(`[nuclear-v2] final micdrop enforcement: trimmed to 2 sentences`);
-      }
-      wordCount = result.split(/\s+/).length;
-    }
-
-    // 9. You/your check: if sentence 1 has no "you/your", prepend accusatory opener
-    {
-      const youSents = result.match(/[^.!?]*[.!?]+/g);
-      const youS1 = youSents ? youSents[0].trim() : result;
-      if (!/\byou\b|\byour\b/i.test(youS1)) {
-        // Local rephrase: prepend accusatory "You decided" + lowercase first char
-        const stripped = youS1.replace(/[.!?]+$/, '').trim();
-        const rephrased = 'You decided ' + stripped.charAt(0).toLowerCase() + stripped.slice(1) + ' was the move';
-        const newS1 = (rephrased.length > 0 && !/[.!?]$/.test(rephrased)) ? rephrased + '.' : rephrased;
-        const rest = youSents && youSents.length > 1 ? ' ' + youSents.slice(1).map(s => s.trim()).join(' ') : '';
-        result = newS1 + rest;
-        wordCount = result.split(/\s+/).length;
-        if (isDev) console.log(`[nuclear-v2] you/your prepend applied (accusatory)`);
-      }
-    }
-
-    // 10. Local punch-up when polish failed (deterministic, no LLM call)
-    if (polishFailed) {
-      const _punchUpAttrs = [];
-      if (isKnownTag(tags.hair) && isUsableFace) _punchUpAttrs.push(tags.hair + ' hair');
-      if (isKnownTag(tags.outfit)) _punchUpAttrs.push(tags.outfit + ' fit');
-      if (isKnownTag(tags.expression) && isUsableFace) _punchUpAttrs.push(tags.expression + ' look');
-      if (isKnownTag(tags.pose) && isUsableFace) _punchUpAttrs.push(tags.pose + ' pose');
-      if (isKnownTag(tags.grooming) && isUsableFace) _punchUpAttrs.push(tags.grooming + ' grooming');
-      result = nv2LocalPunchUp(result, {
-        target,
-        targetSource,
-        socialContext,
-        primaryAttrs: _punchUpAttrs,
+    // Intermediate fallback: best candidate that passes safety + format (even if missing detail/scene anchors)
+    if (!finalRoast) {
+      const safeFormatCandidates = results.filter(r => {
+        const reason = r.reason;
+        return reason === 'missingDetails' || reason === 'missingScene' || reason === 'noS1Anchor' || reason === 'phraseFatigue' || reason === 'templateStem' || reason === 'globalRepeat';
+      }).filter(r => {
+        // Re-verify safety + format on these
+        const t = r.text;
+        const ss = t.match(/[^.!?]*[.!?]+/g);
+        const ww = t.split(/\s+/).length;
+        return ss && ss.length === 2 && ww >= 12 && ww <= 26 && isPlaySafe(t) && !looksLikeRefusal(t) && !nv2HasBannedPatterns(t);
       });
-      wordCount = result.split(/\s+/).length;
+      if (safeFormatCandidates.length > 0) {
+        finalRoast = safeFormatCandidates[0].text;
+        if (isDev) console.log(`[nuclear-v2] intermediateFallback=safeFormat text="${finalRoast}"`);
+      }
     }
-
-    finalRoast = result;
-    break;
-  }
-
-  // If all attempts failed or final roast is a refusal, use safe fallback
-  if (!finalRoast || looksLikeRefusal(finalRoast)) {
-    fallbackUsed = true;
-    finalRoast = NV2_SAFE_FALLBACKS[Math.floor(Math.random() * NV2_SAFE_FALLBACKS.length)];
-    wordCount = finalRoast.split(/\s+/).length;
-    pickedStructure = { id: 'FALLBACK' };
-    pickedTarget = 'fallback';
-    pickedOpenerType = 'OTHER';
-    if (isDev) console.log(`[nuclear-v2] all attempts failed, using safe fallback`);
-  }
-
-  // Tone fix: ensure sentence 1 starts with "You" for accusatory tone
-  const accSents = finalRoast.match(/[^.!?]*[.!?]+/g);
-  if (accSents) {
-    let s1 = accSents[0].trim();
-    const rest = accSents.slice(1).map(s => s.trim()).join(' ');
-    let fixed = false;
-    if (/^Showed up\b/i.test(s1))       { s1 = s1.replace(/^Showed up\b/i, 'You showed up'); fixed = true; }
-    else if (/^Serving\b/i.test(s1))    { s1 = s1.replace(/^Serving\b/i, "You're serving"); fixed = true; }
-    else if (/^Got caught\b/i.test(s1)) { s1 = s1.replace(/^Got caught\b/i, 'You got caught'); fixed = true; }
-    else if (/^Posted\b/i.test(s1))     { s1 = s1.replace(/^Posted\b/i, 'You posted'); fixed = true; }
-    else if (/^Pulled up\b/i.test(s1))  { s1 = s1.replace(/^Pulled up\b/i, 'You pulled up'); fixed = true; }
-    else if (/^Walked in\b/i.test(s1))  { s1 = s1.replace(/^Walked in\b/i, 'You walked in'); fixed = true; }
-    else if (/^Tried\b/i.test(s1))      { s1 = s1.replace(/^Tried\b/i, 'You tried'); fixed = true; }
-    else if (/^Acting like\b/i.test(s1)){ s1 = s1.replace(/^Acting like\b/i, "You're acting like"); fixed = true; }
-    else if (/^Brought\b/i.test(s1))    { s1 = s1.replace(/^Brought\b/i, 'You brought'); fixed = true; }
-    else if (/^Rolled up\b/i.test(s1)) { s1 = s1.replace(/^Rolled up\b/i, 'You rolled up'); fixed = true; }
-    else if (/^Rocked\b/i.test(s1))    { s1 = s1.replace(/^Rocked\b/i, 'You rocked'); fixed = true; }
-    else if (/^Chose\b/i.test(s1))     { s1 = s1.replace(/^Chose\b/i, 'You chose'); fixed = true; }
-    else if (/^Committed\b/i.test(s1)) { s1 = s1.replace(/^Committed\b/i, 'You committed'); fixed = true; }
-    else if (/^That\b/i.test(s1)) {
-      s1 = s1.replace(/^That\b/i, 'You chose that');
-      fixed = true;
-    }
-    else if (/^This\b/i.test(s1)) {
-      s1 = s1.replace(/^This\b/i, 'You chose this');
-      fixed = true;
-    }
-    if (fixed) {
-      // Grammar guard: "You chose that X screams Y" → "You chose that X — and it screams Y"
-      s1 = s1.replace(/^(You chose (?:that |this )?.+?) (screams?)\s+(.+)$/i,
-        (_, before, verb, after) => {
-          let result = `${before} — and it ${verb} ${after}`;
-          if (!/[.!?]$/.test(result)) result += '.';
-          return result;
-        });
-      // Fix trailing "moved." → "moved on."
-      s1 = s1.replace(/\bmoved\.\s*$/, 'moved on.');
-      finalRoast = rest ? s1 + ' ' + rest : s1;
-      if (isDev) console.log(`[nuclear-v2] toneFixApplied=skeleton-accusatory`);
+    if (!finalRoast) {
+      finalRoast = NV2_SAFE_FALLBACKS[Math.floor(Math.random() * NV2_SAFE_FALLBACKS.length)];
+      fallbackUsed = true;
+      if (isDev) console.log('[nuclear-v2] allCandidatesFailed=true using safeFallback');
     }
   }
-  // Grammar cleanup: fix doubled prepositions from tone rewrites
-  finalRoast = finalRoast.replace(/\brolled out up\b/gi, 'rolled up');
-  finalRoast = finalRoast.replace(/\brolled out in\b/gi, 'rolled in');
-  finalRoast = finalRoast.replace(/\brolled out with\b/gi, 'rolled up with');
+  wordCount = finalRoast.split(/\s+/).length;
 
-  // Grammar fix: "You look like X won't" -> "You look like X, and it won't"
-  finalRoast = finalRoast.replace(/^(You look like .+?) won't /i, '$1, and it won\'t ');
+  // ===== PHASE 2: Slim post-processing =====
+  // Re-apply cleanup (already done during validation, but needed for rewrite fallback path)
+  finalRoast = nv2SanitizeQuotes(nv2CleanOutput(finalRoast));
 
-  // Quote sanitization: strip all quotes from sentence 1 to prevent malformed strings
+  // Quote sanitization: strip quotes from sentence 1
   {
     const qSents = finalRoast.match(/[^.!?]*[.!?]+/g);
     if (qSents && qSents.length >= 1) {
@@ -3778,82 +3083,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     }
   }
 
-  // TASK 2: Reduce templated social-outcome phrases in sentence 1
-  {
-    const OVERUSED_OUTCOMES = ['muted', 'archived', 'receipts', 'drafts', 'replies', 'comments'];
-    const outSents = finalRoast.match(/[^.!?]*[.!?]+/g);
-    if (outSents && outSents.length >= 1) {
-      let outS1 = outSents[0];
-      const outS1Lower = outS1.toLowerCase();
-      const found = OVERUSED_OUTCOMES.filter(w => outS1Lower.includes(w));
-      if (found.length >= 2) {
-        // Keep only the first occurrence, remove subsequent ones
-        let kept = false;
-        for (const word of found) {
-          if (!kept) { kept = true; continue; }
-          outS1 = outS1.replace(new RegExp('\\b' + word + '\\b', 'gi'), '').replace(/\s{2,}/g, ' ');
-        }
-        outS1 = outS1.replace(/,\s*,/g, ',').replace(/\s+([.!?])/g, '$1').trim();
-        const outRest = outSents.slice(1).map(s => s.trim()).join(' ');
-        finalRoast = outRest ? outS1 + ' ' + outRest : outS1;
-        if (isDev) console.log(`[nuclear-v2] overusedOutcomeReduced: removed ${found.length - 1} of [${found.join(',')}]`);
-      }
-    }
-  }
-
-  // MICDROP ENFORCEMENT: guarantee micdrop is verbatim in output (before serving/logging)
-  if (micdropUsed && micdropText && !fallbackUsed) {
-    const micdropClean = micdropText.replace(/\.$/, '').trim();
-    if (!finalRoast.includes(micdropClean)) {
-      // Micdrop is missing after all rewrites/trimming — re-attach
-      if (isDev) console.log(`[nuclear-v2] micdropMissingAfterRewrite=true, reattaching`);
-      const enforceSents = finalRoast.match(/[^.!?]*[.!?]+/g);
-      const enforceS1 = enforceSents ? enforceSents[0].trim() : finalRoast.replace(/[.!?]+$/, '').trim() + '.';
-      finalRoast = enforceS1 + ' ' + micdropText;
-    }
-    // Enforce exactly 2 sentences: sentence 1 + micdrop
-    const postSents = finalRoast.match(/[^.!?]*[.!?]+/g);
-    if (postSents && postSents.length > 2) {
-      // Too many sentences — keep only sentence 1 + micdrop
-      finalRoast = postSents[0].trim() + ' ' + micdropText;
-      if (isDev) console.log(`[nuclear-v2] micdropEnforced: trimmed to 2 sentences`);
-    } else if (postSents && postSents.length === 2) {
-      // 2 sentences — ensure sentence 2 IS the micdrop
-      const s2 = postSents[1].trim();
-      if (s2 !== micdropText && !s2.includes(micdropClean)) {
-        finalRoast = postSents[0].trim() + ' ' + micdropText;
-        if (isDev) console.log(`[nuclear-v2] micdropEnforced: replaced sentence 2 with micdrop`);
-      }
-    } else if (!postSents || postSents.length === 1) {
-      // 1 sentence — append micdrop
-      const base = finalRoast.replace(/[.!?]+$/, '').trim() + '.';
-      finalRoast = base + ' ' + micdropText;
-      if (isDev) console.log(`[nuclear-v2] micdropEnforced: appended micdrop as sentence 2`);
-    }
-    // Ensure punctuation is correct
-    if (!/[.!?]$/.test(finalRoast)) finalRoast += '.';
-    wordCount = finalRoast.split(/\s+/).length;
-  }
-
-  // Micdrop brevity: if sentence 2 exceeds 4 words, replace with a short fallback
-  {
-    const brevSents = finalRoast.match(/[^.!?]*[.!?]+/g);
-    if (brevSents && brevSents.length >= 2) {
-      const s2Brev = brevSents[brevSents.length - 1].trim();
-      const s2Wc = s2Brev.split(/\s+/).length;
-      if (s2Wc > 6) {
-        const MICDROP_BREVITY_FALLBACKS = ['Wrong room.', 'Try again.', 'Not even close.', "Crop won't help.", 'Sit down.', 'Delete it.', 'Nope.', 'Bad choice.'];
-        const fallbackMd = MICDROP_BREVITY_FALLBACKS[Math.floor(Math.random() * MICDROP_BREVITY_FALLBACKS.length)];
-        const brevS1 = brevSents[0].trim();
-        finalRoast = brevS1 + ' ' + fallbackMd;
-        micdropText = fallbackMd;
-        wordCount = finalRoast.split(/\s+/).length;
-        if (isDev) console.log(`[nuclear-v2] micdropBrevity: "${s2Brev}" (${s2Wc}w) -> "${fallbackMd}"`);
-      }
-    }
-  }
-
-  // Normalize missing contractions
+  // Contraction normalization
   finalRoast = finalRoast
     .replace(/\bcant\b/g, "can't")
     .replace(/\bCant\b/g, "Can't")
@@ -3862,60 +3092,87 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     .replace(/\bisnt\b/g, "isn't")
     .replace(/\bIsnt\b/g, "Isn't");
 
-  // Push to client state (includes openerType)
-  pushClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id, pickedOpenerType);
-
-  // Logging
-  const tagModifiers = [tags.angle, tags.lighting, tags.framing, tags.pose, tags.setting].map(cleanTagToken).filter(Boolean);
-  const selfieAttrs = [tags.hair, tags.outfit, tags.expression, tags.grooming, tags.bg_vibe].map(cleanTagToken).filter(Boolean);
-  if (isDev) {
-    console.log(`[nuclear-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" opener=${pickedOpenerType} targetSource=${targetSource} sceneTargetsRaw=${dynamicTargets.length} sceneTargetsAfterFilter=${sceneTargetsAfterFilter} tagObjects=${tags.objects.length} tagModifiers=[${tagModifiers.join(',')}] selfieAttrs=[${selfieAttrs.join(',')}] selfieAttrTargetCount=${selfieAttrTargets.length} modifierPhrase=${modifierPhrase ? '"' + modifierPhrase + '"' : 'none'} modifierUsed=${modifierUsed ? '"' + modifierUsed + '"' : 'none'} punchlineUsed=${punchlineUsed} punchlineText=${punchlineText ? '"' + punchlineText + '"' : 'none'} micdropUsed=${micdropUsed} micdropText=${micdropText ? '"' + micdropText + '"' : 'none'} micdropReplacedSentence2=${micdropReplacedSentence2} attempts=${attempts} fallback=${fallbackUsed} finalWords=${wordCount} truncated=${truncationApplied} minWordRetry=${minWordRetry}`);
-    console.log(`[nuclear-v2] result="${finalRoast}"`);
+  // Platform-closer ban: replace sentence 2 if it contains platform-y clichés
+  {
+    const NV2_PLATFORM_CLOSER_BANS = ['the timeline remembers', 'turning off notifications', 'notifications', 'the algorithm noticed', 'left the chat'];
+    const NV2_PLATFORM_CLOSER_REPLACEMENTS = ['Sit down.', 'Delete it.', 'Wrong room.', 'Not even close.', 'Try again.', 'Nope.', 'Bad choice.', 'Log off.'];
+    const pcSents = finalRoast.match(/[^.!?]*[.!?]+/g);
+    if (pcSents && pcSents.length >= 2) {
+      const s2Lower = pcSents[pcSents.length - 1].trim().toLowerCase();
+      if (NV2_PLATFORM_CLOSER_BANS.some(b => s2Lower.includes(b))) {
+        const replacement = NV2_PLATFORM_CLOSER_REPLACEMENTS[Math.floor(Math.random() * NV2_PLATFORM_CLOSER_REPLACEMENTS.length)];
+        finalRoast = pcSents[0].trim() + ' ' + replacement;
+        wordCount = finalRoast.split(/\s+/).length;
+        if (isDev) console.log(`[nuclear-v2] platformCloserBanned: "${pcSents[pcSents.length - 1].trim()}" -> "${replacement}"`);
+      }
+    }
   }
 
-  // Absolute final refusal guard — never return apology text
+  // Timeline+notifications double-up guard
+  {
+    const lower = finalRoast.toLowerCase();
+    if (lower.includes('timeline') && lower.includes('notification')) {
+      finalRoast = finalRoast.replace(/\btimeline\b/gi, 'room');
+      if (isDev) console.log(`[nuclear-v2] timelineNotificationDoubleUp=true -> replaced timeline with room`);
+    }
+  }
+
+  // Broken sentence end repair
+  if (nv2HasBrokenSentenceEnd(finalRoast)) {
+    const repairSents = finalRoast.match(/[^.!?]*[.!?]+/g);
+    if (repairSents) {
+      const repaired = repairSents.map(s => {
+        let t = s.trim();
+        t = t.replace(/\s+\b(a|an|the|of|to|on|in|at|for|with|from|by|as)\s*([.!?])$/, '$2');
+        t = t.replace(/\s+\b(on|in|at|of|to|for|with)\s+the\s*([.!?])$/, '$2');
+        return t;
+      });
+      finalRoast = repaired.join(' ');
+    }
+    if (!/[.!?]$/.test(finalRoast)) finalRoast += '.';
+    if (isDev) console.log(`[nuclear-v2] brokenSentenceEndDetected=true -> repaired`);
+  }
+
+  // Absolute final refusal guard
   if (looksLikeRefusal(finalRoast)) {
     finalRoast = 'That upload was brave. It wasn\'t smart.';
     wordCount = finalRoast.split(/\s+/).length;
     fallbackUsed = true;
   }
 
-  // Track in global anti-repeat pool (also pushed by caller, but needed for intra-function checks)
+  // Push to client state + global anti-repeat pool
+  pushClientRoast(clientId, finalRoast, 'freeform', 'FREEFORM', 'FREEFORM');
   pushRecentNuclear(finalRoast);
 
+  // Track per-client nuclear texts for phrase fatigue
+  state.recentNuclearTexts.push(finalRoast);
+  if (state.recentNuclearTexts.length > 12) state.recentNuclearTexts.shift();
+
   // Track target category and final text for graphic-tee rotation
-  lastNuclearTargetCategory = /\b(outfit|fit|graphic tee)\b/i.test(pickedTarget) ? 'outfit' : 'other';
+  lastNuclearTargetCategory = 'other';
   lastNuclearFinalText = finalRoast;
 
-  if (isDev) console.log(`[nuclear-v2] repeatCheckRan=true pool=${recentNuclearRoasts.length}`);
+  wordCount = finalRoast.split(/\s+/).length;
+
+  if (isDev) {
+    console.log(`[nuclear-v2] result="${finalRoast}" wordCount=${wordCount}`);
+  }
 
   return {
     roast: finalRoast,
     meta: {
-      pickedStructureId: pickedStructure.id,
-      pickedTarget,
-      openerType: pickedOpenerType,
-      targetFromScene,
-      targetSource,
-      sceneTargetCount: dynamicTargets.length,
-      sceneTargetsAfterFilter,
-      tagObjectCount: tags.objects.length,
-      tagModifiers,
-      selfieAttrs,
-      selfieAttrTargetCount: selfieAttrTargets.length,
-      modifierPhrase,
-      modifierUsed,
-      punchlineUsed,
-      punchlineText,
-      micdropUsed,
-      micdropText,
-      micdropReplacedSentence2,
-      attempts,
+      candidateCount: rawCandidates.length,
+      validCount: valid.length,
+      winnerScore: valid.length > 0 ? valid[0].score : 0,
       fallbackUsed,
       clientId,
       wordCount,
-      truncationApplied,
-      minWordRetry,
+      targetSource: 'freeform',
+      selfieAttrs: [tags.hair, tags.outfit, tags.expression, tags.grooming, tags.bg_vibe].map(cleanTagToken).filter(Boolean),
+      tagModifiers: [tags.angle, tags.lighting, tags.framing, tags.pose, tags.setting].map(cleanTagToken).filter(Boolean),
+      sceneTargetCount: dynamicTargets.length,
+      sceneTargetsAfterFilter,
+      tagObjectCount: tags.objects.length,
     },
   };
 }
@@ -3929,7 +3186,7 @@ if (process.env.NV2_DEBUG === '1') {
     const tinyImg = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAFBABAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AAAf/2Q==';
     for (let i = 0; i < 5; i++) {
       const { roast, meta } = await generateNuclearV2({ clientId: testClientId, imageBase64: tinyImg });
-      console.log(`  [${i + 1}] struct=${meta.pickedStructureId} target="${meta.pickedTarget}" words=${meta.wordCount} fallback=${meta.fallbackUsed}`);
+      console.log(`  [${i + 1}] candidates=${meta.candidateCount} valid=${meta.validCount} score=${meta.winnerScore} words=${meta.wordCount} fallback=${meta.fallbackUsed}`);
       console.log(`       "${roast}"`);
     }
     console.log('=== End Self-Check ===\n');
@@ -4302,7 +3559,7 @@ app.post('/api/roast', async (req, res) => {
       themes = [];
       // pushRecentNuclear already called inside generateNuclearV2
       if (isDev) {
-        console.log(`[nuclear-v2] served clientId=${meta.clientId} struct=${meta.pickedStructureId} target="${meta.pickedTarget}" targetSource=${meta.targetSource} sceneRaw=${meta.sceneTargetCount} sceneFiltered=${meta.sceneTargetsAfterFilter} tagObjects=${meta.tagObjectCount} tagModifiers=[${meta.tagModifiers.join(',')}] modifierPhrase=${meta.modifierPhrase ? '"' + meta.modifierPhrase + '"' : 'none'} modifierUsed=${meta.modifierUsed || 'none'} punchlineUsed=${meta.punchlineUsed} punchlineText=${meta.punchlineText ? '"' + meta.punchlineText + '"' : 'none'} micdropUsed=${meta.micdropUsed} micdropText=${meta.micdropText ? '"' + meta.micdropText + '"' : 'none'} micdropReplacedS2=${meta.micdropReplacedSentence2} attempts=${meta.attempts} fallback=${meta.fallbackUsed} words=${meta.wordCount} minWordRetry=${meta.minWordRetry}`);
+        console.log(`[nuclear-v2] served clientId=${meta.clientId} candidates=${meta.candidateCount} valid=${meta.validCount} winnerScore=${meta.winnerScore} sceneRaw=${meta.sceneTargetCount} sceneFiltered=${meta.sceneTargetsAfterFilter} tagObjects=${meta.tagObjectCount} tagModifiers=[${meta.tagModifiers.join(',')}] selfieAttrs=[${meta.selfieAttrs.join(',')}] fallback=${meta.fallbackUsed} words=${meta.wordCount}`);
       }
       // Skip all legacy nuclear logic — jump straight to response
       roasts = roasts.slice(0, config.count);
@@ -4642,11 +3899,7 @@ app.post('/api/roast', async (req, res) => {
           const isOutfitWinner = nuclearLane === 'outfit' || /(shirt|t-shirt)/i.test(trackText);
           recentNuclearOutfitFlags.push(isOutfitWinner);
           if (recentNuclearOutfitFlags.length > MAX_OUTFIT_TRACK) recentNuclearOutfitFlags.shift();
-          // Anchor repetition tracking
-          const winnerLower = trackText.toLowerCase();
-          const winnerAnchors = NUCLEAR_ANCHOR_KEYWORDS.filter(kw => winnerLower.includes(kw));
-          recentNuclearAnchors.push(winnerAnchors);
-          if (recentNuclearAnchors.length > MAX_NUCLEAR_ANCHOR_TRACK) recentNuclearAnchors.shift();
+          // (Anchor tracking removed — handled by nv2ValidateCandidate phrase fatigue)
         }
       } else {
         if (isDev) console.log(`[${tierName}] NO valid candidates, falling back`);
@@ -4802,8 +4055,8 @@ if (process.env.NV2_DEBUG === '1' || process.env.NODE_ENV !== 'production') {
       const { roast, meta } = await generateNuclearV2({ clientId, imageBase64: tinyImg });
       allRoasts.push(roast);
       if (i < 10) samples.push(roast);
-      structureCounts[meta.pickedStructureId] = (structureCounts[meta.pickedStructureId] || 0) + 1;
-      targetCounts[meta.pickedTarget] = (targetCounts[meta.pickedTarget] || 0) + 1;
+      structureCounts[meta.targetSource || 'freeform'] = (structureCounts[meta.targetSource || 'freeform'] || 0) + 1;
+      targetCounts['freeform'] = (targetCounts['freeform'] || 0) + 1;
     }
 
     // Unique roasts (exact match)
