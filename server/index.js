@@ -640,7 +640,7 @@ let lastNuclearFinalText = '';
 function _normAnchor(s) {
   if (!s || typeof s !== 'string') return '';
   return s.toLowerCase()
-    .replace(/[\u2018\u2019\u201C\u201D''""]/g, '')  // curly + straight quotes
+    .replace(/[\u201C\u201D"]/g, '')                   // double quotes only (keep apostrophes)
     .replace(/[^\w\s-]/g, ' ')                        // punctuation -> space (keep hyphens)
     .replace(/\s+/g, ' ')
     .trim();
@@ -817,17 +817,15 @@ SAVAGE RULES (short nuclear):
     tierRules = `
 NUCLEAR RULES:
 - Exactly 2 sentences. Output EXACTLY 2 sentences.
-- Sentence 1: Directly accuse a visible choice in the photo. Imply the user intentionally made a bad decision. Be confident and decisive. No metaphors comparing to abstract things. No hedging. No suggestions. No questions. Roast presentation and choices only — NOT identity. No protected traits, no violence, no threats.
-- Sentence 2: 2–4 words. Cold micdrop. Declarative. No questions. No quotes. No emojis.
-- Tone must feel final and confident.
-- Do not sound playful.
-- Do not sound friendly.
-- Do not offer improvement advice.
+- Sentence 1: Call out a visible mistake or choice in the photo. Speak confidently as if the decision was deliberate. Be decisive and direct.
+- Sentence 2: 2–4 words. Cold, final micdrop. Declarative. No emojis. No quotes.
+- Roast presentation and visible choices only — NOT identity.
+- No protected traits. No violence. No threats.
 - No advice, commands, or imperatives.
-- Humiliate presentation, not existence. Mock effort, not worth.
+- Humiliate effort, not existence.
 - Do NOT imply the person has no value, is forgotten, invisible, or hopeless.
 - Do NOT imply the subject should disappear, die, or not exist.
-- No existential despair, hopelessness, or worthlessness language.
+- Avoid existential despair or worthlessness language.
 - NEVER use: ${BANNED_HEDGING.join(', ')}
 - This must feel like the harshest thing someone could say while looking at this photo.`;
   }
@@ -1113,7 +1111,22 @@ const NUCLEAR_ABSTRACT_ADJECTIVES = [
   'nothingness', 'soulless', 'vapid',
 ];
 
-function scoreRoast(text, tierName, lane = null, { requiredExposure = null } = {}) {
+// Common nuclear openers for soft variety penalty (not hard reject)
+const NUCLEAR_COMMON_OPENERS = [
+  'when your',
+  'you look like',
+  'looking at',
+  'looking like',
+  'staring into',
+  'this lighting',
+  'dim lighting',
+  'the lighting',
+  'in this lighting',
+];
+// Lighting-first opener phrases (subset of above, extra penalty)
+const NUCLEAR_LIGHTING_OPENERS = ['this lighting', 'dim lighting', 'the lighting', 'in this lighting'];
+
+function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clientState = null } = {}) {
   let score = 50;
   const lower = text.toLowerCase();
 
@@ -1125,11 +1138,42 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null } = {
   if (tierName === 'nuclear') {
     // Nuclear uses word-count bands matching the 2-sentence output contract
     const nucWc = text.trim().split(/\s+/).length;
-    if (nucWc >= 12 && nucWc <= 18) score += 18;
-    else if (nucWc >= 19 && nucWc <= 24) score += 10;
-    else if (nucWc >= 25 && nucWc <= 28) score += 2;
-    else if (nucWc > 28) score -= 25;
-    else if (nucWc < 12) score -= 20;
+    if (nucWc >= 14 && nucWc <= 20) score += 20;
+    else if (nucWc >= 21 && nucWc <= 22) score += 10;
+    else if (nucWc >= 23 && nucWc <= 24) score -= 5;
+    else if (nucWc > 24) score -= 20;
+    else if (nucWc < 14) score -= 15;
+
+    // Soft opener penalty: variety pressure for common openers
+    const s1 = (text.match(/[^.!?]*[.!?]+/) || [text])[0].trim().toLowerCase();
+    const matchedOpener = NUCLEAR_COMMON_OPENERS.find(o => s1.startsWith(o));
+    if (matchedOpener) {
+      score -= 14;
+      // Extra penalty if same opener stem used in last 3 nuclear outputs for this client
+      if (clientState && clientState.recentNuclearTexts) {
+        const recent3 = clientState.recentNuclearTexts.slice(-3);
+        const openerUsedRecently = recent3.some(prev => {
+          const prevS1 = (prev.match(/[^.!?]*[.!?]+/) || [prev])[0].trim().toLowerCase();
+          return prevS1.startsWith(matchedOpener);
+        });
+        if (openerUsedRecently) score -= 20;
+      }
+    }
+    // Lighting-first penalty: discourage leading with lighting unless detail pack is thin
+    if (NUCLEAR_LIGHTING_OPENERS.some(lo => s1.startsWith(lo))) {
+      score -= 8;
+    }
+    // Cold micdrop bonus: reward short, clean sentence 2
+    const nucSents = text.match(/[^.!?]*[.!?]+/g);
+    if (nucSents && nucSents.length >= 2) {
+      const nucS2 = nucSents[nucSents.length - 1].trim();
+      const nucS2Lower = nucS2.toLowerCase();
+      const nucS2Wc = nucS2.split(/\s+/).length;
+      if (nucS2Wc >= 2 && nucS2Wc <= 5
+        && !/\b(even|and|because|while|looks?)\b/.test(nucS2Lower)) {
+        score += 10;
+      }
+    }
   } else {
     const targetLen = tierName === 'savage' ? 80 : 250;
     const lenDiff = Math.abs(text.length - targetLen);
@@ -2865,6 +2909,8 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (/\?/.test(text)) return { valid: false, score: 0, reason: 'question' };
   if (/#\w/.test(text)) return { valid: false, score: 0, reason: 'hashtag' };
   if (/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FA9F}]/u.test(text)) return { valid: false, score: 0, reason: 'emoji' };
+  // B3. No quotes (double, curly single, curly double — causes broken formatting)
+  if (/["\u201C\u201D\u2018\u2019]/.test(text)) return { valid: false, score: 0, reason: 'quotes' };
   // C. Safety
   if (!isPlaySafe(text)) return { valid: false, score: 0, reason: 'safety' };
   // D. Refusal
@@ -2902,11 +2948,43 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
 
   // Scoring
   score += Math.min(30, (matchedDetails.length - 2) * 10); // bonus for extra detail anchors
-  const s2 = sents[1].trim();
-  if (s2.split(/\s+/).length <= 5) score += 10; // punchy closer
   if (/^you\b/i.test(text)) score += 5; // accusatory opener
+  // Cold micdrop bonus: reward short, clean sentence 2
+  const s2 = sents[1].trim();
+  const s2Lower = s2.toLowerCase();
+  const s2Wc = s2.split(/\s+/).length;
+  if (s2Wc >= 2 && s2Wc <= 5
+    && !/\b(even|and|because|while|looks?)\b/.test(s2Lower)) {
+    score += 10;
+  }
   score += nv2SoftPenalty(text, false); // existing soft penalty (returns negative)
-  // Opening cadence penalty
+  // Word-count scoring bands (soft — hard reject already handled above)
+  if (wc >= 14 && wc <= 20) score += 20;
+  else if (wc >= 21 && wc <= 22) score += 10;
+  else if (wc >= 23 && wc <= 24) score -= 5;
+  else if (wc > 24) score -= 20;
+  else if (wc < 14) score -= 15;
+  // Soft opener penalty: variety pressure for common openers
+  const nv2S1 = sents[0].trim().toLowerCase();
+  const nv2MatchedOpener = NUCLEAR_COMMON_OPENERS.find(o => nv2S1.startsWith(o));
+  if (nv2MatchedOpener) {
+    score -= 14;
+    // Extra penalty if same opener stem used in last 3 nuclear outputs for this client
+    if (clientState.recentNuclearTexts) {
+      const recent3 = clientState.recentNuclearTexts.slice(-3);
+      const openerUsedRecently = recent3.some(prev => {
+        const prevS1 = (prev.match(/[^.!?]*[.!?]+/) || [prev])[0].trim().toLowerCase();
+        return prevS1.startsWith(nv2MatchedOpener);
+      });
+      if (openerUsedRecently) score -= 20;
+    }
+  }
+  // Lighting-first penalty: discourage leading with lighting unless detail pack is thin
+  if (NUCLEAR_LIGHTING_OPENERS.some(lo => nv2S1.startsWith(lo))) {
+    const nonLightingAnchors = detailAnchors.filter(a => !/\b(dim|bright|harsh|mixed|lighting|backlit|screen glow)\b/i.test(a));
+    if (nonLightingAnchors.length >= 2) score -= 8;
+  }
+  // Opening cadence penalty (exact 4-word match with recent outputs)
   if (clientState.recentNuclearTexts && clientState.recentNuclearTexts.length > 0) {
     const candStart = text.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
     for (const prev of clientState.recentNuclearTexts.slice(-3)) {
@@ -3072,25 +3150,68 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   // Re-apply cleanup (already done during validation, but needed for rewrite fallback path)
   finalRoast = nv2SanitizeQuotes(nv2CleanOutput(finalRoast));
 
-  // Quote sanitization: strip quotes from sentence 1
-  {
-    const qSents = finalRoast.match(/[^.!?]*[.!?]+/g);
-    if (qSents && qSents.length >= 1) {
-      const cleanS1 = qSents[0].replace(/["']/g, '');
-      finalRoast = cleanS1 + (qSents.length > 1 ? ' ' + qSents.slice(1).map(s => s.trim()).join(' ') : '');
-    } else {
-      finalRoast = finalRoast.replace(/["']/g, '');
-    }
-  }
+  // Quote + whitespace cleanup: strip all stray quotes, fix spacing
+  finalRoast = finalRoast
+    .replace(/[\u201C\u201D\u2018\u2019""]/g, '')  // remove double quotes + curly quotes (keep apostrophes)
+    .replace(/\s+/g, ' ')                           // collapse multiple spaces
+    .replace(/\s+([.!?,;:])/g, '$1')                // remove space before punctuation
+    .trim();
 
-  // Contraction normalization
+  // Contraction + possessive normalization
   finalRoast = finalRoast
     .replace(/\bcant\b/g, "can't")
     .replace(/\bCant\b/g, "Can't")
     .replace(/\bwouldnt\b/g, "wouldn't")
     .replace(/\bWouldnt\b/g, "Wouldn't")
     .replace(/\bisnt\b/g, "isn't")
-    .replace(/\bIsnt\b/g, "Isn't");
+    .replace(/\bIsnt\b/g, "Isn't")
+    .replace(/\bdont\b/g, "don't")
+    .replace(/\bDont\b/g, "Don't")
+    .replace(/\bdoesnt\b/g, "doesn't")
+    .replace(/\bDoesnt\b/g, "Doesn't")
+    .replace(/\bwont\b/g, "won't")
+    .replace(/\bWont\b/g, "Won't")
+    .replace(/\bcouldnt\b/g, "couldn't")
+    .replace(/\bCouldnt\b/g, "Couldn't")
+    .replace(/\bshouldnt\b/g, "shouldn't")
+    .replace(/\bShouldnt\b/g, "Shouldn't")
+    .replace(/\bdidnt\b/g, "didn't")
+    .replace(/\bDidnt\b/g, "Didn't")
+    .replace(/\byouve\b/g, "you've")
+    .replace(/\bYouve\b/g, "You've")
+    .replace(/\byoure\b/g, "you're")
+    .replace(/\bYoure\b/g, "You're")
+    .replace(/\btheyre\b/g, "they're")
+    .replace(/\bTheyre\b/g, "They're")
+    .replace(/\bthats\b/g, "that's")
+    .replace(/\bThats\b/g, "That's")
+    .replace(/\bwhats\b/g, "what's")
+    .replace(/\bWhats\b/g, "What's")
+    .replace(/\bheres\b/g, "here's")
+    .replace(/\bHeres\b/g, "Here's")
+    .replace(/\blets\b/g, "let's")
+    .replace(/\bLets\b/g, "Let's")
+    .replace(/\bwhos\b/g, "who's")
+    .replace(/\bWhos\b/g, "Who's")
+    .replace(/\bhasnt\b/g, "hasn't")
+    .replace(/\bHasnt\b/g, "Hasn't")
+    .replace(/\bwasnt\b/g, "wasn't")
+    .replace(/\bWasnt\b/g, "Wasn't")
+    .replace(/\bwerent\b/g, "weren't")
+    .replace(/\bWerent\b/g, "Weren't")
+    .replace(/\bwouldve\b/g, "would've")
+    .replace(/\bWouldve\b/g, "Would've")
+    .replace(/\bcouldve\b/g, "could've")
+    .replace(/\bCouldve\b/g, "Could've")
+    .replace(/\bshouldve\b/g, "should've")
+    .replace(/\bShouldve\b/g, "Should've")
+    // Common possessive fixes (noun + s where apostrophe was stripped)
+    .replace(/\bcars\s+(hood|door|bumper|mirror|seat|window|trunk|roof|paint|interior)/g, "car's $1")
+    .replace(/\bshirts\s+(collar|button|sleeve|fabric|fit|tag|pattern|design|logo)/g, "shirt's $1")
+    .replace(/\bhairs\s+(part|line|texture|color|root|ends|volume|style)/g, "hair's $1")
+    .replace(/\brooms\s+(lighting|vibe|energy|decor|walls|corner|ceiling|floor)/g, "room's $1")
+    .replace(/\bmirrors\s+(reflection|angle|edge|frame|smudge)/g, "mirror's $1")
+    .replace(/\bphones\s+(camera|flash|angle|case|screen|glow)/g, "phone's $1");
 
   // Platform-closer ban: replace sentence 2 if it contains platform-y clichés
   {
@@ -3674,7 +3795,7 @@ app.post('/api/roast', async (req, res) => {
                 continue;
               }
             }
-            const score = scoreRoast(clamped, tierName, nuclearLane, { requiredExposure });
+            const score = scoreRoast(clamped, tierName, nuclearLane, { requiredExposure, clientState: tierName === 'nuclear' ? getClientState(clientId) : null });
             candidates.push({ text: clamped, score, themes: result.themes });
             if (isDev) console.log(`[roast] candidate score=${score} — "${clamped.slice(0, 60)}…"`);
           }
