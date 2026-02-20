@@ -1566,7 +1566,36 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
       if (/^\s*(Nobody|People|Everyone|The internet|Your friends|Strangers|The camera|Your mirror)\b/i.test(sent2)) score += 8;
       // Reward: sentence 2 contains room-reaction token (+6)
       if (/\b(group chat|comments|timeline|the room|the internet)\b/i.test(sent2)) score += 6;
+
+      // --- Cold micdrop scoring (sentence 2 brevity & tone) ---
+      const s2WordCount = sent2.trim().split(/\s+/).length;
+
+      // Reward: blunt declarative second sentences (highest applicable only, no stacking)
+      const comparativePhrases = ['than', 'even', 'as', 'more', 'because', 'while'];
+      if (s2WordCount <= 3 && !comparativePhrases.some(p => s2Lower.includes(p))) score += 25;
+      else if (s2WordCount <= 5 && !comparativePhrases.some(p => s2Lower.includes(p))) score += 20;
+
+      // Penalize: explanatory/comparative micdrop openers
+      if (/^\s*(even|that|your|because|while)\b/i.test(sent2)) score -= 8;
+
+      // Penalize: "Even " opener in sentence 2
+      if (s2Lower.startsWith('even ')) score -= 18;
+
+      // Reward: decisive declarative tone (no hedging, no comparisons, ends with period)
+      const s2NoLooks = !/\b(looks|seems)\b/i.test(sent2);
+      const s2NoThan = !/\bthan\b/i.test(sent2);
+      const s2NoBecause = !/\bbecause\b/i.test(sent2);
+      const s2Declarative = /\.\s*$/.test(sent2);
+      if (s2NoLooks && s2NoThan && s2NoBecause && s2Declarative) score += 12;
     }
+
+    // Penalize: comparative phrasing anywhere in nuclear text (-15)
+    if (/\b(more than|less than|wider than|brighter than)\b/i.test(text) || /\bas\s/i.test(text) || /\bthan\s/i.test(text) || /\beven\s/i.test(text)) {
+      score -= 15;
+    }
+
+    // Penalize: "When" opener on sentence 1
+    if (/^\s*when\s/i.test(text)) score -= 18;
 
     // Nuclear-only hard penalties for formulaic/crutch patterns
     if (/\bYou (imagine|expect|insist|assume|pretend)\b/i.test(text)) score -= 40;
