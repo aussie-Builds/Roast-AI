@@ -1916,8 +1916,8 @@ const NV2_ESCALATION_BUCKET = [
 // --- Safe fallback templates (for when play-safe filter blocks everything) ---
 const NV2_SAFE_FALLBACKS = [
   'That angle was a creative choice. The creativity is debatable.',
-  'Your confidence did not read the room before entering.',
-  'This photo has the energy of a cover letter nobody asked for.',
+  'Your confidence walked in without reading the room. Nobody clapped.',
+  'This photo has cover letter energy. Nobody asked for it.',
   'Bold strategy going with this look. Bold, not effective.',
   'You posed like you rehearsed this. The rehearsal needed rehearsal.',
 ];
@@ -2974,6 +2974,13 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (/i(?:'m| am) not sure who|can'?t (?:tell|identify)/i.test(text)) return { valid: false, score: 0, reason: 'identityDisclaimer' };
   // M. Sentence-1 anchor gate: s1 must reference at least one photo-specific detail
   if (!nv2HasAnyAnchorToken(sents[0], detailAnchors)) return { valid: false, score: 0, reason: 'noS1Anchor' };
+  // N. Micdrop validator: sentence 2 must be a tight, declarative punchline
+  const s2Raw = sents[1].trim();
+  const s2WordCount = s2Raw.split(/\s+/).length;
+  if (s2WordCount < 2 || s2WordCount > 8) return { valid: false, score: 0, reason: 'weakMicdrop' };
+  if (/^even\s/i.test(s2Raw)) return { valid: false, score: 0, reason: 'weakMicdrop' };
+  if (/\?/.test(s2Raw)) return { valid: false, score: 0, reason: 'weakMicdrop' };
+  if (!/[.!]$/.test(s2Raw)) return { valid: false, score: 0, reason: 'weakMicdrop' };
 
   // Scoring
   score += Math.min(30, (matchedDetails.length - 2) * 10); // bonus for extra detail anchors
@@ -2986,6 +2993,8 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
     && !/\b(even|and|because|while|looks?)\b/.test(s2Lower)) {
     score += 10;
   }
+  // Comparative/explanatory connectives in sentence 2: soft penalty (moved from hard reject)
+  if (/ than | as | more | because | while /i.test(s2)) score -= 8;
   score += nv2SoftPenalty(text, false); // existing soft penalty (returns negative)
   // Word-count scoring bands (soft — hard reject already handled above)
   if (wc >= 14 && wc <= 20) score += 20;
@@ -3123,28 +3132,30 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   if (valid.length > 0) {
     finalRoast = valid[0].text;
   } else {
-    // Rewrite fallback: take best rejected candidate, fix the specific violation
-    const bestReject = results.sort((a, b) => b.score - a.score)[0];
-    if (bestReject) {
+    // Pick best source candidate for rewrite: highest score, prefer weakMicdrop rejects
+    const micdropRejects = results.filter(r => r.reason === 'weakMicdrop').sort((a, b) => b.score - a.score);
+    const bestSource = micdropRejects.length > 0 ? micdropRejects[0]
+      : results.sort((a, b) => b.score - a.score)[0] || results[0];
+    // Text-only rewrite call (no image) — cheaper, faster, focused on format fix
+    if (bestSource) {
       try {
-        const fixPrompt = `Fix this roast caption: "${bestReject.text}"\nProblem: ${bestReject.reason}.\n${detailsBlock}\nRules: exactly 2 sentences, 12-26 words, reference at least 2 visible details. No questions, emojis, or hashtags. Keep the voice. Output only the fixed caption.`;
-        const fixResp = await openai.responses.create({
+        const rewritePrompt = `Rewrite this roast caption: "${bestSource.text}"\nProblem: ${bestSource.reason}.\n${detailsBlock}\nRules:\n- EXACTLY 2 sentences, 14-22 words total.\n- Sentence 2 must be 2-8 words. Sentence 2 must NOT start with "Even".\n- Reference at least 2 visible details and 1 scene element.\n- No quotes, no emojis, no hashtags, no questions.\n- Google Play safe.\n- Keep the comedic voice. Output ONLY the fixed caption.`;
+        const rewriteResp = await openai.responses.create({
           model: 'gpt-4o',
           input: [
-            { role: 'system', content: 'Fix the caption per the instructions. Output only the result.' },
-            { role: 'user', content: [
-              { type: 'input_text', text: fixPrompt },
-              { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
-            ]},
+            { role: 'system', content: 'Rewrite the caption per the rules. Output only the result, no explanation.' },
+            { role: 'user', content: rewritePrompt },
           ],
           max_output_tokens: 60,
           temperature: 0.5,
         });
-        const fixed = nv2SanitizeQuotes(nv2CleanOutput(fixResp.output_text || ''));
+        const fixed = nv2SanitizeQuotes(nv2CleanOutput(rewriteResp.output_text || ''));
         const fixResult = nv2ValidateCandidate(fixed, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev });
         if (fixResult.valid) {
           finalRoast = fixed;
           if (isDev) console.log(`[nuclear-v2] rewriteFallback=success text="${fixed}"`);
+        } else if (isDev) {
+          console.log(`[nuclear-v2] rewriteFallback=rejected reason=${fixResult.reason} text="${fixed}"`);
         }
       } catch (e) {
         if (isDev) console.log(`[nuclear-v2] rewriteFallback=error ${e.message}`);
@@ -3154,9 +3165,9 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     if (!finalRoast) {
       const safeFormatCandidates = results.filter(r => {
         const reason = r.reason;
-        return reason === 'missingDetails' || reason === 'missingScene' || reason === 'noS1Anchor' || reason === 'phraseFatigue' || reason === 'templateStem' || reason === 'globalRepeat';
+        return reason === 'missingDetails' || reason === 'missingScene' || reason === 'noS1Anchor' || reason === 'phraseFatigue' || reason === 'templateStem' || reason === 'globalRepeat' || reason === 'weakMicdrop';
       }).filter(r => {
-        // Re-verify safety + format on these
+        // Re-verify safety + format on these (relax micdrop for intermediate)
         const t = r.text;
         const ss = t.match(/[^.!?]*[.!?]+/g);
         const ww = t.split(/\s+/).length;
@@ -3167,6 +3178,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
         if (isDev) console.log(`[nuclear-v2] intermediateFallback=safeFormat text="${finalRoast}"`);
       }
     }
+    // Deterministic 2-sentence fallback (never return a 1-sentence result)
     if (!finalRoast) {
       finalRoast = NV2_SAFE_FALLBACKS[Math.floor(Math.random() * NV2_SAFE_FALLBACKS.length)];
       fallbackUsed = true;
