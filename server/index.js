@@ -606,16 +606,15 @@ function nv2HasAnyAnchorToken(sentence, anchorCandidates) {
 
 // Detect soft/hedging language in sentence 1 of a nuclear-v2 result
 const NV2_SOFT_PATTERNS = [
-  'kind of', 'somewhat', 'a bit', 'trying to', 'almost', 'kinda', 'lowkey',
-  'low-key', 'respectfully', 'not gonna lie', 'ngl', "it's giving",
-  "its giving", 'your vibe', 'your energy', 'your aura', 'your expression',
-  'unintentional', 'new level', 'achieved',
+  'your vibe', 'your energy', 'your aura', "it's giving", "its giving",
+  'giving me', 'with that', 'not sure if', 'when your',
 ];
+const NV2_SOFT_REGEX = /\bmajor\s+\S+\s+energy\b/i;
 function s1IsSoft(result) {
   if (!result) return false;
   const sents = result.match(/[^.!?]*[.!?]+/g);
   const s1 = sents ? sents[0].trim().toLowerCase() : result.toLowerCase();
-  return NV2_SOFT_PATTERNS.some(p => s1.includes(p));
+  return NV2_SOFT_PATTERNS.some(p => s1.includes(p)) || NV2_SOFT_REGEX.test(s1);
 }
 
 // Nuclear lane rotation: force varied topical anchors across calls
@@ -2905,7 +2904,7 @@ function nv2ContradictsFacts(text, facts) {
 
 // --- Nuclear V2 freeform candidate generation ---
 async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
-  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Sentence 1 MUST start with "You" or "Your".\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.`;
+  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Sentence 1 MUST start with "You" or "Your".\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.`;
   const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Sentence 1: reference ≥2 visible details. Sentence 2: 3–7 word cold punchline ending in "." only (no "!"). Be specific, original, punchy.`;
 
   const calls = Array.from({ length: n }, () =>
@@ -2955,7 +2954,7 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   // G. Scene anchor: ≥1 if sceneAnchors is non-empty
   if (sceneAnchors.length > 0) {
     const hasScene = sceneAnchors.some(s => lower.includes(s.toLowerCase()));
-    if (!hasScene) return { valid: false, score: 0, reason: 'missingScene' };
+    if (!hasScene) { score -= 18; if (isDev) console.log(`[nuclear-v2] missingScene penalty applied`); }
   }
   // H. Template stems
   if (NV2_FREEFORM_STEM_BANS.some(s => lower.includes(s))) return { valid: false, score: 0, reason: 'templateStem' };
@@ -2963,9 +2962,10 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (isRecentNuclearRepeat(text)) return { valid: false, score: 0, reason: 'globalRepeat' };
   // J. Phrase fatigue (per-client)
   if (clientState.recentNuclearTexts) {
-    const candStart = text.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+    const nv2FatigueStart = (t) => { const w = t.toLowerCase().split(/\s+/); if (w[0] === 'you' || w[0] === 'your') w.shift(); return w.slice(0, 4).join(' '); };
+    const candStart = nv2FatigueStart(text);
     for (const prev of clientState.recentNuclearTexts.slice(-10)) {
-      const prevStart = prev.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+      const prevStart = nv2FatigueStart(prev);
       if (candStart === prevStart) return { valid: false, score: 0, reason: 'phraseFatigue' };
       if (tokenOverlap(text, prev) >= 0.55) return { valid: false, score: 0, reason: 'phraseFatigue' };
     }
@@ -2980,12 +2980,13 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   // N. Micdrop validator: sentence 2 must be a cold, declarative punchline
   const s2Raw = sents[1].trim();
   const s2WordCount = s2Raw.split(/\s+/).length;
-  if (s2WordCount < 2 || s2WordCount > 12) { if (isDev) console.log(`[nuclear-v2] weakMicdrop wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
-  if (/^even\s/i.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop even-start wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (s2WordCount < 2 || s2WordCount > 11) { if (isDev) console.log(`[nuclear-v2] weakMicdrop wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  const s2HasAnchor = nv2HasAnyAnchorToken(s2Raw, [...detailAnchors, ...(sceneAnchors || [])]);
+  if (/^even\s/i.test(s2Raw)) { if (!s2HasAnchor) { if (isDev) console.log(`[nuclear-v2] weakMicdrop even-start unanchored s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; } score -= 10; if (isDev) console.log(`[nuclear-v2] even-start penalty (anchored) s2="${s2Raw}"`); }
   if (/^(and|but|so)\s/i.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop leading-conj wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
   if (/\?/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop question wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
-  if (/!/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop exclamation wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
-  if (!/\.$/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop no-period wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (/!/.test(s2Raw) && s2WordCount > 4) { score -= 4; if (isDev) console.log(`[nuclear-v2] exclamation penalty s2="${s2Raw}"`); }
+  if (!/[.!]$/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop no-terminal wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
 
   // Scoring
   score += Math.min(30, (matchedDetails.length - 2) * 10); // bonus for extra detail anchors
@@ -3004,8 +3005,16 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   const NV2_CORNY_MICDROP_TOKENS = ['tool time', 'era', 'arc', 'main character', 'of despair', 'energy', 'vibes', 'rizz', 'sigma', 'npc', 'final boss'];
   const cornyMatch = NV2_CORNY_MICDROP_TOKENS.find(t => s2Lower.includes(t));
   if (cornyMatch) { score -= 12; if (isDev) console.log(`[nuclear-v2] cornyMicdrop: "${cornyMatch}" in s2="${s2}"`); }
+  // Generic micdrop penalty: penalize abstract filler punchlines
+  const NV2_GENERIC_MICDROP_TOKENS = ['confidence', 'charisma', 'motivation', 'vibes', 'energy', 'aura', 'personality', 'presence', 'effort', 'try-hard', 'desperation', 'midlife crisis', 'hopes dashed', 'cringe'];
+  const s2GenericMatch = NV2_GENERIC_MICDROP_TOKENS.find(t => s2Lower.includes(t));
+  if (s2GenericMatch) {
+    if (s2HasAnchor) { score -= 6; if (isDev) console.log(`[nuclear-v2] genericMicdrop anchored: "${s2GenericMatch}" in s2="${s2}"`); }
+    else { if (isDev) console.log(`[nuclear-v2] genericMicdrop unanchored: "${s2GenericMatch}" in s2="${s2}"`); return { valid: false, score: 0, reason: 'genericMicdropUnanchored' }; }
+  }
   // Specificity bonus: reward micdrop that references image details
-  if (nv2HasAnyAnchorToken(s2, [...detailAnchors, ...(sceneAnchors || [])])) score += 10;
+  if (s2HasAnchor) score += 12;
+  if (s2Wc >= 3 && s2Wc <= 7 && s2HasAnchor && !s2GenericMatch) score += 10;
   score += nv2SoftPenalty(text, false); // existing soft penalty (returns negative)
   // Word-count scoring bands (soft — hard reject already handled above)
   if (wc >= 14 && wc <= 20) score += 20;
@@ -3031,13 +3040,14 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   // Lighting-first penalty: discourage leading with lighting unless detail pack is thin
   if (NUCLEAR_LIGHTING_OPENERS.some(lo => nv2S1.startsWith(lo))) {
     const nonLightingAnchors = detailAnchors.filter(a => !/\b(dim|bright|harsh|mixed|lighting|backlit|screen glow)\b/i.test(a));
-    if (nonLightingAnchors.length >= 2) score -= 8;
+    if (nonLightingAnchors.length >= 3) score -= 8;
   }
-  // Opening cadence penalty (exact 4-word match with recent outputs)
+  // Opening cadence penalty (exact 4-word match with recent outputs, skip leading you/your)
   if (clientState.recentNuclearTexts && clientState.recentNuclearTexts.length > 0) {
-    const candStart = text.split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+    const nv2CadenceStart = (t) => { const w = t.toLowerCase().split(/\s+/); if (w[0] === 'you' || w[0] === 'your') w.shift(); return w.slice(0, 4).join(' '); };
+    const candStart = nv2CadenceStart(text);
     for (const prev of clientState.recentNuclearTexts.slice(-3)) {
-      if (prev.split(/\s+/).slice(0, 4).join(' ').toLowerCase() === candStart) { score -= 15; break; }
+      if (nv2CadenceStart(prev) === candStart) { score -= 15; break; }
     }
   }
   return { valid: true, score, reason: null };
