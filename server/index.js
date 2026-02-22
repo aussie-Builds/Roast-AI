@@ -2905,8 +2905,8 @@ function nv2ContradictsFacts(text, facts) {
 
 // --- Nuclear V2 freeform candidate generation ---
 async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
-  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Roast the visible styling choices, pose, effort, and setting — never the person's body, identity, or physical features. Be specific to what you see in the image. Be blunt, punchy, and original. No questions, no emojis, no hashtags, no profanity. Output EXACTLY 2 sentences totaling 12–26 words. Google Play safe.`;
-  const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Reference at least 2 of these visible details. Be specific, original, and punchy.`;
+  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Sentence 1 MUST start with "You" or "Your".\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.`;
+  const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Sentence 1: reference ≥2 visible details. Sentence 2: 3–7 word cold punchline ending in "." only (no "!"). Be specific, original, punchy.`;
 
   const calls = Array.from({ length: n }, () =>
     openai.responses.create({
@@ -2919,7 +2919,7 @@ async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
         ]},
       ],
       max_output_tokens: 60,
-      temperature: 0.85,
+      temperature: 0.78,
     }).then(r => r.output_text || null).catch(() => null)
   );
   return (await Promise.all(calls)).filter(Boolean);
@@ -2931,6 +2931,8 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   // A. Exactly 2 sentences
   const sents = text.match(/[^.!?]*[.!?]+/g);
   if (!sents || sents.length !== 2) return { valid: false, score: 0, reason: 'sentenceCount' };
+  // A2. Sentence 1 must start with "You" or "Your" (direct/accusational framing)
+  if (!/^\s*(you|your)\b/i.test(sents[0])) return { valid: false, score: 0, reason: 'noDirectS1' };
   // B. 12-26 words
   const wc = text.split(/\s+/).length;
   if (wc < 12 || wc > 26) return { valid: false, score: 0, reason: 'wordCount' };
@@ -2972,15 +2974,18 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (s1IsSoft(text)) return { valid: false, score: 0, reason: 'softOpener' };
   // L. Identity disclaimer
   if (/i(?:'m| am) not sure who|can'?t (?:tell|identify)/i.test(text)) return { valid: false, score: 0, reason: 'identityDisclaimer' };
-  // M. Sentence-1 anchor gate: s1 must reference at least one photo-specific detail
-  if (!nv2HasAnyAnchorToken(sents[0], detailAnchors)) return { valid: false, score: 0, reason: 'noS1Anchor' };
-  // N. Micdrop validator: sentence 2 must be a tight, declarative punchline
+  // M. Sentence-1 anchor gate: s1 must reference at least one photo-specific detail (or scene anchor)
+  const s1AnchorPool = [...detailAnchors, ...(sceneAnchors || [])];
+  if (!nv2HasAnyAnchorToken(sents[0], s1AnchorPool)) return { valid: false, score: 0, reason: 'noS1Anchor' };
+  // N. Micdrop validator: sentence 2 must be a cold, declarative punchline
   const s2Raw = sents[1].trim();
   const s2WordCount = s2Raw.split(/\s+/).length;
-  if (s2WordCount < 2 || s2WordCount > 8) return { valid: false, score: 0, reason: 'weakMicdrop' };
-  if (/^even\s/i.test(s2Raw)) return { valid: false, score: 0, reason: 'weakMicdrop' };
-  if (/\?/.test(s2Raw)) return { valid: false, score: 0, reason: 'weakMicdrop' };
-  if (!/[.!]$/.test(s2Raw)) return { valid: false, score: 0, reason: 'weakMicdrop' };
+  if (s2WordCount < 2 || s2WordCount > 12) { if (isDev) console.log(`[nuclear-v2] weakMicdrop wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (/^even\s/i.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop even-start wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (/^(and|but|so)\s/i.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop leading-conj wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (/\?/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop question wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (/!/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop exclamation wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  if (!/\.$/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop no-period wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
 
   // Scoring
   score += Math.min(30, (matchedDetails.length - 2) * 10); // bonus for extra detail anchors
@@ -2995,6 +3000,12 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   }
   // Comparative/explanatory connectives in sentence 2: soft penalty (moved from hard reject)
   if (/ than | as | more | because | while /i.test(s2)) score -= 8;
+  // Corny micdrop penalty (soft — not a hard reject)
+  const NV2_CORNY_MICDROP_TOKENS = ['tool time', 'era', 'arc', 'main character', 'of despair', 'energy', 'vibes', 'rizz', 'sigma', 'npc', 'final boss'];
+  const cornyMatch = NV2_CORNY_MICDROP_TOKENS.find(t => s2Lower.includes(t));
+  if (cornyMatch) { score -= 12; if (isDev) console.log(`[nuclear-v2] cornyMicdrop: "${cornyMatch}" in s2="${s2}"`); }
+  // Specificity bonus: reward micdrop that references image details
+  if (nv2HasAnyAnchorToken(s2, [...detailAnchors, ...(sceneAnchors || [])])) score += 10;
   score += nv2SoftPenalty(text, false); // existing soft penalty (returns negative)
   // Word-count scoring bands (soft — hard reject already handled above)
   if (wc >= 14 && wc <= 20) score += 20;
@@ -3110,8 +3121,9 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   ];
   const sceneAnchors = [...new Set(rawScenePool)].filter(s => s.length >= 3 && !NV2_GENERIC_SCENE_STOP.has(s));
 
-  // Generate 8 candidates in parallel
-  const rawCandidates = await nv2GenerateCandidates({ imageBase64, detailsBlock, n: 8 });
+  // Generate candidates in parallel (more when face is unusable)
+  const genN = isUsableFace ? 8 : 12;
+  const rawCandidates = await nv2GenerateCandidates({ imageBase64, detailsBlock, n: genN });
 
   // Validate + score
   const results = rawCandidates.map(raw => {
