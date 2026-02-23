@@ -2982,7 +2982,9 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   const s2WordCount = s2Raw.split(/\s+/).length;
   if (s2WordCount < 2 || s2WordCount > 11) { if (isDev) console.log(`[nuclear-v2] weakMicdrop wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
   const s2HasAnchor = nv2HasAnyAnchorToken(s2Raw, [...detailAnchors, ...(sceneAnchors || [])]);
-  if (/^even\s/i.test(s2Raw)) { if (!s2HasAnchor) { if (isDev) console.log(`[nuclear-v2] weakMicdrop even-start unanchored s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; } score -= 10; if (isDev) console.log(`[nuclear-v2] even-start penalty (anchored) s2="${s2Raw}"`); }
+  if (/^even\s/i.test(s2Raw)) { if (!s2HasAnchor) { if (isDev) console.log(`[nuclear-v2] weakMicdrop even-start unanchored s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; } score -= 14; if (isDev) console.log(`[nuclear-v2] even-start penalty (anchored) s2="${s2Raw}"`); }
+  if (/looks disappointed/i.test(s2Raw)) { score -= 6; if (isDev) console.log(`[nuclear-v2] micdrop phrase penalty: looks disappointed`); }
+  if (/(?:is|are) judging/i.test(s2Raw)) { score -= 4; if (isDev) console.log(`[nuclear-v2] micdrop phrase penalty: judging`); }
   if (/^(and|but|so)\s/i.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop leading-conj wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
   if (/\?/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop question wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
   if (/!/.test(s2Raw) && s2WordCount > 4) { score -= 4; if (isDev) console.log(`[nuclear-v2] exclamation penalty s2="${s2Raw}"`); }
