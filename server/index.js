@@ -53,17 +53,17 @@ const INTENSITY_CONFIG = {
   savage: {
     count: 1,
     minChars: 0,
-    maxChars: 120,
-    maxWords: 18,
-    maxSentences: 1,
-    maxTokens: 50,
+    maxChars: 200,
+    maxWords: 22,
+    maxSentences: 2,
+    maxTokens: 70,
     candidates: 12,
-    temperature: 1.0,
+    temperature: 1.05,
     top_p: 0.9,
     presence_penalty: 0.8,
     frequency_penalty: 0.5,
-    style: 'short nuclear — one sharp sentence, direct ego hit',
-    format: 'ONE sentence, 10–18 words, ends on a punch verdict; no list',
+    style: 'cold verdict + micdrop — tight, humiliating, screenshot-ready',
+    format: 'TWO sentences, 12–22 words, s2 is micdrop from list; no list',
   },
   nuclear: {
     count: 1,
@@ -352,7 +352,7 @@ const SAVAGE_IMPERATIVES = [
 const SAVAGE_CRUTCHES = [
   'giving off', 'major', 'vibes', 'that shirt says', 'that face says',
   'that smile says', 'that look says', 'that stare says', 'that pose says',
-  'but your', "but it's", 'but the',
+  'but your', "but it's",
 ];
 
 const SAVAGE_ENV_TOKENS = ['garage', 'room', 'setup', 'lighting', 'background', 'wall', 'car'];
@@ -438,6 +438,19 @@ const SAVAGE_PUNCH_ENDINGS = [
   'unfinished', 'unconvincing', 'secondhand',
 ];
 
+// Savage V2: micdrop punchlines (sentence 2 must match exactly)
+const SAVAGE_MICDROPS = [
+  'Sit down.', 'Delete it.', 'Be serious.', 'Try again.', 'Log off.',
+  'Wrong audience.', 'Stay in drafts.', 'Not today.', 'Case closed.',
+];
+const SAVAGE_MICDROP_SET = new Set(SAVAGE_MICDROPS.map(m => m.toLowerCase()));
+
+// Savage V2: verdict framing starters for sentence 1 (scoring bonus)
+const SAVAGE_VERDICT_STARTERS = [
+  'you posted this', 'you framed this', 'you aimed for',
+  "this isn't", 'not a flex', 'you thought this', 'you called this',
+];
+
 // Comparison templates that savage must never use (hard reject + selection filter)
 const SAVAGE_COMPARISON_TEMPLATES = [
   /\beven your\b/i,
@@ -476,16 +489,16 @@ const FALLBACKS = {
     "Your vibe is buffering.",
   ],
   savage: [
-    "You dress like you lost a bet and just kept going.",
-    "That smile is doing community service for the rest of your face.",
-    "Confidence like yours should require a permit.",
-    "You peaked and somehow kept going downhill.",
-    "That effort was generous, the result was not.",
-    "Bold of you to post this without a filter.",
-    "You rehearsed this and it still flopped.",
-    "Everything about this screams overcompensation.",
-    "You confused confidence with delusion again.",
-    "That stance says main character but the results say background.",
+    "You posted this like it was a flex and it absolutely was not. Sit down.",
+    "You framed this like a highlight reel but the footage disagrees. Delete it.",
+    "You aimed for effortless and landed on aimless with that angle. Be serious.",
+    "You called this your good side but that grin says otherwise. Try again.",
+    "You thought this lighting would save you but it just exposed more. Log off.",
+    "You posted this outfit like a statement but the statement is unclear. Wrong audience.",
+    "You framed this smile like it was candid but it looks rehearsed. Stay in drafts.",
+    "You aimed for intimidating but that posture tells a different story. Not today.",
+    "You thought this pose was giving confidence but it gave the opposite. Case closed.",
+    "You called this angle flattering but the camera saw through it. Be serious.",
   ],
   nuclear: [
     "Your expression is rehearsed but your eyes forgot the script. Nobody taught you how to be genuine.",
@@ -803,15 +816,16 @@ MEDIUM RULES:
 - End on the joke.`;
   } else if (tierName === 'savage') {
     tierRules = `
-SAVAGE RULES (short nuclear):
-- ONE sentence only. 10–18 words. Max 120 characters.
-- Mention one visible detail (face feature, posture, outfit, hair, expression, prop, surroundings).
-- Direct ego or status hit — stated as cold fact, not a guess. Use "you" statements.
-- End on a punch verdict word (e.g. pathetic, cringe, fraud, awkward, tragic, delusion, embarrassing).
-- No questions. No advice. No imperatives (no "upgrade", "fix", "try", "stop").
+SAVAGE RULES (cold verdict + micdrop):
+- EXACTLY 2 sentences. 12–22 words total.
+- Sentence 1: cold verdict about their decision-making or self-perception, referencing ONE visible detail (outfit, posture, expression, hair, angle, lighting, background, etc.). Use "you" statements.
+- Sentence 2: micdrop punchline. Must be EXACTLY one of: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed.
+- No questions. No advice. No imperatives in sentence 1.
+- No emojis, no quotes (no ' or "), no hashtags.
+- Do not use the phrases "you look like", "screams", or "your expression".
 - Do NOT imply the person has no value, is forgotten, invisible, or hopeless.
 - No existential despair or worthlessness language.
-- Tone: cold, direct, personal. One sharp stab.`;
+- Tone: cold, direct, humiliating. Screenshot-ready.`;
   } else if (tierName === 'nuclear') {
     tierRules = `
 NUCLEAR RULES:
@@ -1001,34 +1015,43 @@ function validateRoast(text, tierName) {
   }
 
   // Length limits
-  if (tierName === 'savage' && text.length > 120) reasons.push(`too-long:${text.length}/120`);
+  if (tierName === 'savage' && text.length > 200) reasons.push(`too-long:${text.length}/200`);
   if (tierName === 'nuclear' && text.length > 400) reasons.push(`too-long:${text.length}/400`);
 
   // Must reference a visible detail (hard-fail for savage, scoring penalty for nuclear)
   const hasVisual = VISUAL_KEYWORDS.some(kw => lower.includes(kw));
   if (!hasVisual && tierName !== 'nuclear') reasons.push('no-visual-detail');
 
-  // Savage-only validation (short nuclear — minimal bans, nuclear-level safety)
+  // Savage-v2 validation (cold verdict + micdrop — 2-sentence contract)
   if (tierName === 'savage') {
     const savageWordCount = text.trim().split(/\s+/).length;
-    // 10–18 words
-    if (savageWordCount > 18) reasons.push(`savage-too-many-words:${savageWordCount}/18`);
-    if (savageWordCount < 10) reasons.push(`savage-too-few-words:${savageWordCount}/10`);
-    // Exactly 1 sentence
     const sSentences = text.match(/[^.!?]*[.!?]+/g) || [text];
-    if (sSentences.length > 1) reasons.push(`savage-multi-sentence:${sSentences.length}`);
+    // Exactly 2 sentences
+    if (sSentences.length !== 2) reasons.push(`savage-sentenceCount:${sSentences.length}/2`);
+    // 12–22 words total
+    if (savageWordCount > 22) reasons.push(`savage-too-many-words:${savageWordCount}/22`);
+    if (savageWordCount < 12) reasons.push(`savage-too-few-words:${savageWordCount}/12`);
+    // Sentence 2: micdrop must be 1–4 words and match SAVAGE_MICDROPS
+    if (sSentences.length === 2) {
+      const s2 = sSentences[1].trim();
+      const s2Wc = s2.split(/\s+/).length;
+      if (s2Wc < 1 || s2Wc > 4) reasons.push(`savage-s2-wordCount:${s2Wc}/1-4`);
+      if (!SAVAGE_MICDROP_SET.has(s2.toLowerCase())) reasons.push('savage-s2-not-micdrop');
+    }
     // No questions
     if (text.includes('?')) reasons.push('savage-question');
-    // No digits / count words
-    if (/\d/.test(text)) reasons.push('savage-contains-digit');
-    if (/\b(one|two|three|four|five|six|seven|eight|nine|ten|once|twice|thrice|times|couple|few|several)\b/i.test(text)) reasons.push('savage-count-word');
-    // No imperative openers
-    for (const s of sSentences) {
-      const fw = s.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '');
-      if (SAVAGE_IMPERATIVES.includes(fw)) {
-        reasons.push(`savage-imperative:${fw}`);
-        break;
-      }
+    // No quotes (double straight + all curly — straight apostrophe ' allowed for contractions)
+    if (/["\u201C\u201D\u2018\u2019]/.test(text)) reasons.push('savage-quotes');
+    // No emojis
+    if (/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FA9F}]/u.test(text)) reasons.push('savage-emoji');
+    // Template crutch bans
+    if (sSentences.length >= 1 && /^\s*you look like\b/i.test(sSentences[0])) reasons.push('savage-you-look-like');
+    if (/\bscreams\b/i.test(text)) reasons.push('savage-screams');
+    if (/\byour expression\b/i.test(text)) reasons.push('savage-expression-template');
+    // No imperative openers in sentence 1 only
+    if (sSentences.length >= 1) {
+      const fw = sSentences[0].trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '');
+      if (SAVAGE_IMPERATIVES.includes(fw)) reasons.push(`savage-imperative:${fw}`);
     }
     // Nuclear-level safety: worthlessness bans
     for (const phrase of NUCLEAR_BANNED_WORTHLESSNESS) {
@@ -1044,25 +1067,10 @@ function validateRoast(text, tierName) {
     for (const crutch of SAVAGE_CRUTCHES) {
       if (lower.includes(crutch)) { reasons.push(`savage-crutch:${crutch}`); break; }
     }
-    // Environment as punchline (env token in last 3 words)
-    const last3 = text.trim().split(/\s+/).slice(-3).join(' ').toLowerCase().replace(/[^a-z\s]/g, '');
-    if (SAVAGE_ENV_TOKENS.some(t => last3.includes(t))) reasons.push('savage-env-punchline');
-    // Bleak/defeated language (savage-only, not nuclear list)
+    // Bleak/defeated language
     for (const term of SAVAGE_BLEAK) {
       if (lower.includes(term)) { reasons.push(`savage-bleak:${term}`); break; }
     }
-    // Comparative template patterns (keep faster/harder/brighter as hard rejects)
-    if (/\bfaster\b.+\bthan\b/i.test(text)) reasons.push('savage-template:faster-than');
-    if (/\bharder\b.+\bthan\b/i.test(text)) reasons.push('savage-template:harder-than');
-    if (/\bbrighter\b.+\bthan\b/i.test(text)) reasons.push('savage-template:brighter-than');
-    // No commas
-    if (text.includes(',')) reasons.push('savage-comma');
-    // Opener bans (start-of-sentence only)
-    if (/^\s*you look like\b/i.test(text)) reasons.push('savage-opener:you-look-like');
-    if (/^\s*with that\b/i.test(text)) reasons.push('savage-opener:with-that');
-    if (/^\s*even your\b/i.test(text)) reasons.push('savage-opener:even-your');
-    // Template: "auditioning for"
-    if (/\bauditioning for\b/i.test(text)) reasons.push('savage-template:auditioning');
   }
 
   // Nuclear-only: banned identity-erasure phrases (word-boundary regex)
@@ -1199,53 +1207,54 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
 
   // Penalize: too many sentences for tier
   const sentenceCount = (text.match(/[.!?]+/g) || []).length;
-  if (tierName === 'savage' && sentenceCount > 1) score -= 15;
   if (tierName === 'nuclear' && sentenceCount > 2) score -= 25;
 
-  // --- Savage-specific scoring (short nuclear) ---
+  // --- Savage-v2 scoring (cold verdict + micdrop) ---
   if (tierName === 'savage') {
-    const words = text.trim().split(/\s+/);
-    const wordCount = words.length;
-    const lastWord = words[words.length - 1]?.toLowerCase().replace(/[^a-z-]/g, '') || '';
+    const sentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+    const wordCount = text.trim().split(/\s+/).length;
+
+    // Reward: exactly 2 sentences
+    if (sentences.length === 2) score += 25;
+    else score -= 20;
+
+    // Reward: s2 matches micdrop list
+    if (sentences.length === 2) {
+      const s2 = sentences[1].trim().toLowerCase();
+      if (SAVAGE_MICDROP_SET.has(s2)) score += 25;
+    }
+
+    // Reward: s1 starts with verdict framing
+    if (sentences.length >= 1) {
+      const s1Lower = sentences[0].trim().toLowerCase();
+      if (SAVAGE_VERDICT_STARTERS.some(st => s1Lower.startsWith(st))) score += 10;
+    }
+
+    // Reward: visual detail present in s1
+    if (sentences.length >= 1) {
+      const s1Lower = sentences[0].trim().toLowerCase();
+      if (VISUAL_KEYWORDS.some(kw => s1Lower.includes(kw))) score += 10;
+    }
+
+    // Reward: direct address ("you" / "your") in s1
+    if (sentences.length >= 1 && /\byou(r|'re|'ve|'ll)?\b/.test(sentences[0].toLowerCase())) score += 10;
 
     // Word count sweet spot
-    if (wordCount >= 10 && wordCount <= 14) score += 15;
-    else if (wordCount >= 15 && wordCount <= 18) score += 5;
-    if (wordCount > 18) score -= 30;
-    if (wordCount < 10) score -= 20;
+    if (wordCount >= 14 && wordCount <= 18) score += 5;
+    else if (wordCount < 14 || wordCount > 18) score -= 5;
 
-    // Reward: direct address ("you" / "your")
-    if (/\byou(r|'re|'ve|'ll)?\b/.test(lower)) score += 10;
-    else score -= 15;
+    // Penalize: template crutches
+    if (/\byou look like\b/i.test(text)) score -= 40;
+    if (/\bscreams\b/i.test(text)) score -= 40;
+    // Soft penalty: "but the" in sentence 1 (removed from hard-reject crutch list)
+    if (sentences.length >= 1 && sentences[0].toLowerCase().includes('but the')) score -= 15;
 
-    // Reward: punch verdict ending
-    if (SAVAGE_PUNCH_ENDINGS.includes(lastWord)) score += 15;
-    // Penalize: neutral filler ending
-    const neutralEndings = ['the', 'a', 'an', 'it', 'is', 'was', 'and', 'but', 'or', 'of', 'to', 'in', 'on', 'for', 'that', 'this', 'with'];
-    if (neutralEndings.includes(lastWord)) score -= 10;
-
-    // Reward: visual detail present
-    if (VISUAL_KEYWORDS.some(kw => lower.includes(kw))) score += 10;
-
-    // Reward: ego/status hit language
-    const statusWords = ['confidence', 'competence', 'embarrassing', 'pathetic', 'delusional',
-      'overconfident', 'awkward', 'desperate', 'audacity', 'delusion', 'fraud', 'cringe',
-      'performing', 'pretending', 'rehearsed', 'fronting', 'bravado', 'try-hard', 'tryhard'];
-    if (statusWords.some(w => lower.includes(w))) score += 10;
-
-    // Reward: ends with punctuation
-    if (/[.!]$/.test(text.trim())) score += 5;
-
-    // Penalize: repeated punch ending across recent outputs
-    if (lastWord) {
-      const recentEndings = recentSavageRoasts.slice(-5).map(r => {
-        const rw = r.replace(/[^a-z\s-]/g, '').trim().split(/\s+/);
-        return rw[rw.length - 1] || '';
-      });
-      const endingRepeats = recentEndings.filter(e => e === lastWord).length;
-      if (endingRepeats >= 2) score -= 30;
-      else if (endingRepeats === 1) score -= 15;
+    // Penalize: overused tokens
+    let overusedPenalty = 0;
+    for (const tok of SAVAGE_OVERUSED_TOKENS) {
+      if (lower.includes(tok)) overusedPenalty += 10;
     }
+    score -= Math.min(overusedPenalty, 20);
 
     // Penalize: too similar to recent savage outputs
     for (const prev of recentSavageRoasts) {
@@ -1256,31 +1265,13 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
     const anchor = detectSavageAnchor(text);
     const last5Anchors = recentSavageAnchors.slice(-5);
     const last2Anchors = last5Anchors.slice(-2);
-    // Same anchor as any of last 2 roasts
     if (last2Anchors.includes(anchor)) score -= 40;
-    // Same anchor appears 3+ times in last 5
     if (last5Anchors.filter(a => a === anchor).length >= 3) score -= 60;
 
     // Structure tracking: penalize repeated structures
     const structure = detectSavageStructure(text);
     const last2Structs = recentSavageStructures.slice(-2);
     if (structure !== 'direct-verdict' && last2Structs.includes(structure)) score -= 20;
-
-    // Penalize: no direct address at all
-    if (!/\byou(r|'re|'ve|'ll)?\b/.test(lower)) score -= 20;
-
-    // Penalize: env-only (env tokens but no personal anchor) — allowed if YOU anchor exists
-    const hasEnvToken = SAVAGE_ENV_TOKENS.some(t => lower.includes(t));
-    const hasPersonalAnchor = SAVAGE_PERSONAL_ANCHORS.some(t => lower.includes(t));
-    if (hasEnvToken && !hasPersonalAnchor && !/\byou(r|'re|'ve|'ll)?\b/.test(lower)) score -= 25;
-
-    // Penalize: "screams" crutch
-    if (/\bscream(s|ing|ed)?\b/i.test(text)) score -= 15;
-
-    // Penalize: "more...than" comparative — heavier if repeated structure
-    if (/\bmore\b.+\bthan\b/i.test(text)) {
-      score -= (last2Structs.includes(structure) ? 20 : 10);
-    }
 
     // Tie-breaker
     score -= text.length % 7;
@@ -3632,9 +3623,9 @@ app.post('/api/roast', async (req, res) => {
 
     // Savage style diversity: randomly pick a structural style hint each request
     const SAVAGE_STYLE_HINTS = [
-      'Style: direct verdict — no comparisons, just a blunt personal judgment.',
-      'Style: exposure — call out try-hard or overcompensation without comparing objects.',
-      'Style: social read — short, blunt, how others read this person. Avoid "nobody" or "no one".',
+      'Style: cold verdict — state what went wrong as fact, then drop the micdrop.',
+      'Style: exposure — call out the gap between intent and result, then close it.',
+      'Style: social read — describe how this reads to others, then shut it down.',
     ];
     const savageStyleHint = tierName === 'savage'
       ? ' ' + SAVAGE_STYLE_HINTS[Math.floor(Math.random() * SAVAGE_STYLE_HINTS.length)]
@@ -3684,7 +3675,7 @@ app.post('/api/roast', async (req, res) => {
     }
 
     const systemMsg = tierName === 'savage'
-      ? `You are a roast comedian. ONE sentence. 10–18 words. Reference a visible detail. Direct ego/status hit. End on a punch verdict word. No questions. No advice. No existential despair.${savageStyleHint} Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
+      ? `You are a roast comedian. EXACTLY 2 sentences. 12–22 words total. Sentence 1: cold verdict referencing ONE visible detail, using "you" statements. Sentence 2: micdrop from this list ONLY: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed. No questions. No advice. No emojis. No quote marks of any kind. Do not use the phrases "you look like", "screams", or "your expression". No existential despair.${savageStyleHint} Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
       : tierName === 'nuclear'
         ? `You are a ruthless roast comedian specializing in social humiliation, not descriptive insults. The goal is exposing delusion in front of an audience. Write exactly 1–2 sentences total. No third sentence. No colon-style closer. Sentence 1: visual/trait observation — anchor on something visible (angle/hair/hoodie/posture, max 12 words). Sentence 2 (if present): social verdict — reference audience perception (anyone/people/everyone/nobody/they/buying it/fooled) OR a room-reaction phrase (the room/the whole room/anyone watching). Sentence 2 MUST NOT start with "You". BANNED WORDS: imagine, expect, insist, assume, pretend. BANNED PHRASES: "does you no favors", "isn't doing you any favors", "your expression", "the lighting". Do not use these under any circumstances.${nuclearStyleHint}${nuclearLaneBlock} Do NOT rely on "tired/drained/low energy/low battery" as the main punch. One safe absurd kicker allowed occasionally (e.g., "even the garage door isn't impressed" / "your RGB wants a refund") but avoid dehumanization and worthlessness. Avoid poetic metaphors. Cold and cutting. No existential despair. No "nobody cares" or "forgettable". Avoid substance references (hungover/drunk/high). Avoid diagnosis/therapy wording. Avoid "warning sign" phrasing. Avoid "screams" and "you clearly" templates. Avoid words like "detected", "confirmed", "exposed", "analyzed". FORMAT: output 1–2 sentences. No line breaks, no bullet points, no ellipsis-only fragments. Aim for 60–160 characters total. Respond with ONLY valid JSON: {"roasts":["Your sentences here."]}. No markdown. No code fences. No explanations.${nuclearAvoidBlock}`
         : `You are a sharp, observational roast comedian. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanations.`;
@@ -3804,19 +3795,12 @@ app.post('/api/roast', async (req, res) => {
           for (const r of result.roasts) {
             let clamped = clampRoast(r.replace(/\s+/g, ' ').trim(), config.maxSentences, config.maxChars, config.maxWords);
             if (!clamped) continue;
-            // Savage-specific hard clamp: 1 sentence, 16 words, 110 chars, no commas
+            // Savage-v2 hard clamp: keep first 2 sentences, 22-word cap
             if (tierName === 'savage') {
-              // Strip to first sentence
-              const sentEnd = clamped.search(/[.!?]/);
-              if (sentEnd !== -1) clamped = clamped.slice(0, sentEnd + 1).trim();
-              // Remove commas and re-trim
-              if (clamped.includes(',')) clamped = clamped.replace(/,/g, '').replace(/\s+/g, ' ').trim();
-              // Hard cap 16 words
-              const sw = clamped.split(/\s+/);
-              if (sw.length > 16) clamped = sw.slice(0, 16).join(' ').trim();
-              // Hard cap 110 chars
-              if (clamped.length > 110) clamped = clamped.slice(0, 110).trim();
-              // Re-ensure ends with punctuation
+              const savSents = clamped.match(/[^.!?]*[.!?]+/g);
+              if (savSents && savSents.length > 2) clamped = savSents.slice(0, 2).map(s => s.trim()).join(' ');
+              const sw = clamped.trim().split(/\s+/);
+              if (sw.length > 22) clamped = sw.slice(0, 22).join(' ').trim();
               if (!/[.!?]$/.test(clamped)) clamped = clamped + '.';
               if (!clamped || clamped.length < 10) continue;
             }
@@ -3880,7 +3864,7 @@ app.post('/api/roast', async (req, res) => {
           generateCandidates(groupBSys, groupBCount),
         ]);
         candidates = groupA.concat(groupB);
-        if (isDev) console.log(`[savage] round1: ${groupA.length} face-focused + ${groupB.length} context-focused = ${candidates.length} valid candidates from ${numCandidates} calls`);
+        if (isDev) console.log(`[savage-v2] round1: ${groupA.length} face-focused + ${groupB.length} context-focused = ${candidates.length} valid candidates from ${numCandidates} calls`);
       } else {
         candidates = await generateCandidates(systemMsg);
         if (isDev) console.log(`[${tierName}] round1: ${candidates.length} valid candidates from ${numCandidates} calls`);
@@ -3915,7 +3899,7 @@ app.post('/api/roast', async (req, res) => {
         const harderSys = tierName === 'nuclear'
           ? systemMsg + ` BE HARSHER. Exactly 3 sentences. Sentence 1: vivid visual anchor (max 12 words). Sentence 2: ego hit using "you" statements (max 16 words). Sentence 3: knockout closer (2–5 words, caption-like). No questions. No filler. JSON ONLY.`
           : tierName === 'savage'
-            ? systemMsg + ` EXACTLY ONE SENTENCE. 8–16 words ONLY. Pick ONE visible thing and destroy them with it. Last word must sting. NO template openers. NO "your expression". NO "you look like". JSON ONLY.`
+            ? systemMsg + ` EXACTLY 2 sentences. 12–22 words. Sentence 1: cold verdict about ONE visible thing. Sentence 2: pick one micdrop from: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. JSON ONLY.`
             : systemMsg + ` BE MUCH SHORTER. RESPOND WITH ONLY JSON. NO ESSAYS.`;
         const round2 = await generateCandidates(harderSys);
         if (isDev) console.log(`[${tierName}] round2: ${round2.length} valid candidates`);
@@ -3946,10 +3930,10 @@ app.post('/api/roast', async (req, res) => {
 
       // --- Savage round 3: last-ditch retry before fallback ---
       if (tierName === 'savage' && candidates.length === 0) {
-        if (isDev) console.log(`[savage] round1+2 empty, triggering round3 rewrite`);
-        const rewriteSys = systemMsg + ` Rewrite the roast. Avoid numbers/attempt counts. Avoid repeating prior roasts. Keep within tier rules. JSON ONLY.`;
+        if (isDev) console.log(`[savage-v2] round1+2 empty, triggering round3 rewrite`);
+        const rewriteSys = systemMsg + ` EXACTLY 2 sentences. Sentence 1: cold verdict about ONE visible detail. Sentence 2: MUST be one of: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. Avoid repeating prior roasts. JSON ONLY.`;
         const round3 = await generateCandidates(rewriteSys);
-        if (isDev) console.log(`[savage] round3: ${round3.length} valid candidates`);
+        if (isDev) console.log(`[savage-v2] round3: ${round3.length} valid candidates`);
         candidates = round3;
       }
 
@@ -3963,10 +3947,9 @@ app.post('/api/roast', async (req, res) => {
         candidates = round3Nuclear;
       }
 
-      // Dev: log savage rejection distribution
+      // Dev: log savage-v2 rejection distribution (mirror nuclear-v2 shape)
       if (isDev && tierName === 'savage' && Object.keys(savageRejectCounts).length > 0) {
-        const top = Object.entries(savageRejectCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
-        console.log(`[savage] rejection reasons: ${top.map(([r, c]) => `${r}=${c}`).join(', ')}`);
+        console.log(`[savage-v2] candidates=${numCandidates} valid=${candidates.length} rejected=${JSON.stringify(savageRejectCounts)}`);
       }
 
       if (candidates.length > 0) {
@@ -4042,13 +4025,12 @@ app.post('/api/roast', async (req, res) => {
         if (isDev) {
           console.log(`[${tierName}] PICKED score=${best.score} from ${candidates.length} total — "${best.text.slice(0, 80)}…"`);
           if (tierName === 'savage') {
-            const _bl = best.text.toLowerCase();
-            const _hasVis = VISUAL_KEYWORDS.some(kw => _bl.includes(kw));
-            const _hasEgo = SAVAGE_EGO_EXPOSURE_TOKENS.some(t => _bl.includes(t));
-            const _bWords = best.text.trim().split(/\s+/);
-            const _lastW = _bWords[_bWords.length - 1]?.toLowerCase().replace(/[^a-z-]/g, '') || '';
-            const _hasVerdict = SAVAGE_PUNCH_ENDINGS.includes(_lastW);
-            console.log(`[savage] anchor=${detectSavageAnchor(best.text)} structure=${detectSavageStructure(best.text)} mini-nuclear=${_hasVis}+${_hasEgo}+${_hasVerdict}`);
+            const _svSents = best.text.match(/[^.!?]*[.!?]+/g) || [best.text];
+            const _svS2 = _svSents.length >= 2 ? _svSents[1].trim() : '';
+            const _svMicdropMatch = SAVAGE_MICDROP_SET.has(_svS2.toLowerCase());
+            const _svWc = best.text.trim().split(/\s+/).length;
+            console.log(`[savage-v2] winner score=${best.score} text="${best.text}"`);
+            console.log(`[savage-v2] anchor=${detectSavageAnchor(best.text)} structure=${detectSavageStructure(best.text)} s2="${_svS2}" micdropMatch=${_svMicdropMatch} wordCount=${_svWc}`);
           }
           if (tierName === 'nuclear') {
             const _candNorm = normalizeForOverlap(nuclearBodyText || best.text);
@@ -4145,7 +4127,7 @@ app.post('/api/roast', async (req, res) => {
       // Log skipped exact matches
       if (isDev) {
         for (const e of allOptions) {
-          if (e.isExactLast && nonExact.length > 0) console.log(`[savage] fallback-skip-exact: "${e.text.slice(0, 60)}"`);
+          if (e.isExactLast && nonExact.length > 0) console.log(`[savage-v2] fallback-skip-exact: "${e.text.slice(0, 60)}"`);
         }
       }
       if (scored.length > 0 && roasts.length < config.count) {
@@ -4159,7 +4141,7 @@ app.post('/api/roast', async (req, res) => {
         pushRecentSavage(pick.text);
         pushRecentSavageAnchor(pick.text);
         pushRecentSavageStructure(pick.text);
-        if (isDev) console.log(`[savage] fallback-used: "${pick.text.slice(0, 60)}"`);
+        if (isDev) console.log(`[savage-v2] fallback=true text="${pick.text.slice(0, 60)}"`);
       }
     } else {
       for (const fb of levelFallbacks) {
@@ -4174,7 +4156,7 @@ app.post('/api/roast', async (req, res) => {
             pushRecentSavage(text);
             pushRecentSavageAnchor(text);
             pushRecentSavageStructure(text);
-            if (isDev) console.log(`[savage] fallback-used: "${text.slice(0, 60)}"`);
+            if (isDev) console.log(`[savage-v2] fallback=true text="${text.slice(0, 60)}"`);
           }
         }
       }
@@ -4189,14 +4171,13 @@ app.post('/api/roast', async (req, res) => {
         .filter(r => r.length > 0);
     }
 
-    // --- Savage post-clamp: 16-word hard cap + ensure punctuation ---
+    // --- Savage-v2 post-clamp: 22-word hard cap + ensure punctuation ---
     if (tierName === 'savage') {
       roasts = roasts.map(r => {
         const words = r.split(/\s+/);
-        if (words.length > 16) {
-          r = words.slice(0, 16).join(' ').trim();
+        if (words.length > 22) {
+          r = words.slice(0, 22).join(' ').trim();
         }
-        // Ensure savage always ends with . or !
         if (!/[.!]$/.test(r.trim())) r = r.trim() + '.';
         return r;
       });
