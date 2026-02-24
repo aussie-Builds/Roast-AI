@@ -18,6 +18,8 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 
 import { API_BASE_URL } from '@/constants/api';
+import { canRoast, recordRoast } from '@/utils/rateLimiter';
+import UpgradeModal from '@/components/UpgradeModal';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 
@@ -108,6 +110,8 @@ export default function PreviewScreen() {
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<RoastLevel>('medium');
   const [shareMode, setShareMode] = useState(false);
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
+  const [upgradeReason, setUpgradeReason] = useState('');
   const animValue = useRef(new Animated.Value(0)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
@@ -164,6 +168,14 @@ export default function PreviewScreen() {
       return;
     }
 
+    // Rate limit check
+    const check = await canRoast(level);
+    if (!check.allowed) {
+      setUpgradeReason(check.reason ?? '');
+      setUpgradeVisible(true);
+      return;
+    }
+
     if (level === 'nuclear') {
       const confirmed = await new Promise<boolean>((resolve) =>
         Alert.alert(
@@ -202,6 +214,7 @@ export default function PreviewScreen() {
       }
 
       setRoasts(data.roasts);
+      await recordRoast(level);
     } catch (err) {
       console.error('Roast error:', err);
       if (err instanceof TypeError && err.message.includes('Network request failed')) {
@@ -434,6 +447,11 @@ export default function PreviewScreen() {
           </Text>
         </Pressable>
       </View>
+      <UpgradeModal
+        visible={upgradeVisible}
+        reason={upgradeReason}
+        onClose={() => setUpgradeVisible(false)}
+      />
     </View>
   );
 }
