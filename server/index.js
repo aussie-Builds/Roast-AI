@@ -822,7 +822,9 @@ SAVAGE RULES (cold verdict + micdrop):
 - Sentence 2: micdrop punchline. Must be EXACTLY one of: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed.
 - No questions. No advice. No imperatives in sentence 1.
 - No emojis, no quotes (no ' or "), no hashtags.
-- Do not use the phrases "you look like", "screams", or "your expression".
+- NEVER use the phrase "you look like" or "looks like". These are banned.
+- Do not use the phrases "screams" or "your expression".
+- Sentence 1 should preferably start with one of these verdict-framing starters: "You posted this like …", "You framed this like …", "You aimed for …", "This isn't …", "That [detail] isn't …", "Not a flex …", "You called this …"
 - Do NOT imply the person has no value, is forgotten, invisible, or hopeless.
 - No existential despair or worthlessness language.
 - Tone: cold, direct, humiliating. Screenshot-ready.`;
@@ -1046,6 +1048,7 @@ function validateRoast(text, tierName) {
     if (/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FA9F}]/u.test(text)) reasons.push('savage-emoji');
     // Template crutch bans
     if (sSentences.length >= 1 && /^\s*you look like\b/i.test(sSentences[0])) reasons.push('savage-you-look-like');
+    if (sSentences.length >= 1 && /\blooks like\b/i.test(sSentences[0])) reasons.push('savage-looks-like');
     if (/\bscreams\b/i.test(text)) reasons.push('savage-screams');
     if (/\byour expression\b/i.test(text)) reasons.push('savage-expression-template');
     // No imperative openers in sentence 1 only
@@ -1227,7 +1230,10 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
     // Reward: s1 starts with verdict framing
     if (sentences.length >= 1) {
       const s1Lower = sentences[0].trim().toLowerCase();
-      if (SAVAGE_VERDICT_STARTERS.some(st => s1Lower.startsWith(st))) score += 10;
+      const startsWithVerdict = SAVAGE_VERDICT_STARTERS.some(st => s1Lower.startsWith(st));
+      if (startsWithVerdict) score += 20;
+      // Soft penalty: "You …" opener that isn't a verdict starter
+      else if (/^\s*you\s/i.test(sentences[0]) && !startsWithVerdict) score -= 10;
     }
 
     // Reward: visual detail present in s1
@@ -3675,7 +3681,7 @@ app.post('/api/roast', async (req, res) => {
     }
 
     const systemMsg = tierName === 'savage'
-      ? `You are a roast comedian. EXACTLY 2 sentences. 12–22 words total. Sentence 1: cold verdict referencing ONE visible detail, using "you" statements. Sentence 2: micdrop from this list ONLY: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed. No questions. No advice. No emojis. No quote marks of any kind. Do not use the phrases "you look like", "screams", or "your expression". No existential despair.${savageStyleHint} Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
+      ? `You are a roast comedian. EXACTLY 2 sentences. 12–22 words total. Sentence 1: cold verdict referencing ONE visible detail, using "you" statements. Sentence 2: micdrop from this list ONLY: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed. No questions. No advice. No emojis. No quote marks of any kind. NEVER use the phrase "you look like" or "looks like" — these are banned. Do not use "screams" or "your expression". Prefer verdict-framing starters for sentence 1: "You posted this like …", "You framed this like …", "You aimed for …", "This isn't …", "Not a flex …", "You called this …". No existential despair.${savageStyleHint} Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
       : tierName === 'nuclear'
         ? `You are a ruthless roast comedian specializing in social humiliation, not descriptive insults. The goal is exposing delusion in front of an audience. Write exactly 1–2 sentences total. No third sentence. No colon-style closer. Sentence 1: visual/trait observation — anchor on something visible (angle/hair/hoodie/posture, max 12 words). Sentence 2 (if present): social verdict — reference audience perception (anyone/people/everyone/nobody/they/buying it/fooled) OR a room-reaction phrase (the room/the whole room/anyone watching). Sentence 2 MUST NOT start with "You". BANNED WORDS: imagine, expect, insist, assume, pretend. BANNED PHRASES: "does you no favors", "isn't doing you any favors", "your expression", "the lighting". Do not use these under any circumstances.${nuclearStyleHint}${nuclearLaneBlock} Do NOT rely on "tired/drained/low energy/low battery" as the main punch. One safe absurd kicker allowed occasionally (e.g., "even the garage door isn't impressed" / "your RGB wants a refund") but avoid dehumanization and worthlessness. Avoid poetic metaphors. Cold and cutting. No existential despair. No "nobody cares" or "forgettable". Avoid substance references (hungover/drunk/high). Avoid diagnosis/therapy wording. Avoid "warning sign" phrasing. Avoid "screams" and "you clearly" templates. Avoid words like "detected", "confirmed", "exposed", "analyzed". FORMAT: output 1–2 sentences. No line breaks, no bullet points, no ellipsis-only fragments. Aim for 60–160 characters total. Respond with ONLY valid JSON: {"roasts":["Your sentences here."]}. No markdown. No code fences. No explanations.${nuclearAvoidBlock}`
         : `You are a sharp, observational roast comedian. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanations.`;
@@ -3899,7 +3905,7 @@ app.post('/api/roast', async (req, res) => {
         const harderSys = tierName === 'nuclear'
           ? systemMsg + ` BE HARSHER. Exactly 3 sentences. Sentence 1: vivid visual anchor (max 12 words). Sentence 2: ego hit using "you" statements (max 16 words). Sentence 3: knockout closer (2–5 words, caption-like). No questions. No filler. JSON ONLY.`
           : tierName === 'savage'
-            ? systemMsg + ` EXACTLY 2 sentences. 12–22 words. Sentence 1: cold verdict about ONE visible thing. Sentence 2: pick one micdrop from: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. JSON ONLY.`
+            ? systemMsg + ` EXACTLY 2 sentences. 12–22 words. Sentence 1: cold verdict about ONE visible thing. NEVER use "you look like" or "looks like". Sentence 2: pick one micdrop from: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. JSON ONLY.`
             : systemMsg + ` BE MUCH SHORTER. RESPOND WITH ONLY JSON. NO ESSAYS.`;
         const round2 = await generateCandidates(harderSys);
         if (isDev) console.log(`[${tierName}] round2: ${round2.length} valid candidates`);
@@ -3931,7 +3937,7 @@ app.post('/api/roast', async (req, res) => {
       // --- Savage round 3: last-ditch retry before fallback ---
       if (tierName === 'savage' && candidates.length === 0) {
         if (isDev) console.log(`[savage-v2] round1+2 empty, triggering round3 rewrite`);
-        const rewriteSys = systemMsg + ` EXACTLY 2 sentences. Sentence 1: cold verdict about ONE visible detail. Sentence 2: MUST be one of: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. Avoid repeating prior roasts. JSON ONLY.`;
+        const rewriteSys = systemMsg + ` EXACTLY 2 sentences. Sentence 1: cold verdict about ONE visible detail. NEVER use "you look like" or "looks like". Sentence 2: MUST be one of: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. Avoid repeating prior roasts. JSON ONLY.`;
         const round3 = await generateCandidates(rewriteSys);
         if (isDev) console.log(`[savage-v2] round3: ${round3.length} valid candidates`);
         candidates = round3;
