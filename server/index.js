@@ -39,10 +39,19 @@ app.get('/health', (req, res) => {
 // --- Intensity configuration ---
 const INTENSITY_CONFIG = {
   mild: {
-    count: 3,
+    count: 1,
     minChars: 0,
-    style: 'playful, light teasing',
-    format: 'short one-liners',
+    candidates: 8,
+    maxSentences: 1,
+    maxChars: 120,
+    maxWords: 14,
+    maxTokens: 60,
+    temperature: 1.0,
+    top_p: 0.92,
+    presence_penalty: 0.5,
+    frequency_penalty: 0.3,
+    style: 'playful, light observational tease — "haha okay fair"',
+    format: 'EXACTLY 1 sentence, 8–14 words, shareable without offense',
   },
   medium: {
     count: 1,
@@ -485,6 +494,30 @@ const MEDIUM_STYLE_HINTS = [
   'Style: unearned confidence — the swagger exceeded the substance.',
 ];
 
+// --- Mild V2 constants ---
+const MILD_BANNED_OPENERS = [
+  'try', 'fix', 'go', 'stop', 'get', 'change', 'should', 'need', 'learn',
+];
+
+const MILD_TEMPLATE_CRUTCHES = [
+  'your vibe', 'energy', 'aura', "it's giving", 'giving off', 'vibes', 'giving me',
+];
+
+const MILD_WEAK_WORDS = ['nice', 'okay', 'fine', 'kinda', 'maybe'];
+
+const MILD_HARSH_WORDS = [
+  'pathetic', 'worthless', 'disgusting', 'hideous', 'ugly', 'repulsive',
+  'loser', 'failure', 'disaster', 'hopeless', 'tragic', 'depressing',
+  'nobody cares', 'existential', 'better days',
+];
+
+// Mild V2: style diversity hints (rotated per request)
+const MILD_STYLE_HINTS = [
+  'Style: friendly tease — like a friend gently pointing something out.',
+  'Style: light observation — notice something visible and make it funny.',
+  'Style: playful jab — warm humor, zero sting.',
+];
+
 // Savage V2: verdict framing starters for sentence 1 (scoring bonus)
 const SAVAGE_VERDICT_STARTERS = [
   'you posted this', 'you framed this', 'you aimed for',
@@ -513,11 +546,13 @@ const SAVAGE_EGO_EXPOSURE_TOKENS = [
 
 const FALLBACKS = {
   mild: [
-    "Your selfie game is… developing. Like a Polaroid from 2003.",
-    "You look like you'd apologize to a revolving door.",
-    "That smile says 'I peaked in a group project once.'",
-    "You give off strong 'reply-all by accident' energy.",
-    "Bless your heart, you really tried with that angle.",
+    "That angle was a creative choice but the lighting had other plans.",
+    "The pose is giving main character in a very quiet movie.",
+    "That smile took a few attempts and honestly it shows a little.",
+    "The background is working harder than the outfit in this one.",
+    "That expression landed somewhere between confident and confused.",
+    "The lighting saved this photo and it deserves a thank you.",
+    "That outfit committed to something but the pose did not follow.",
   ],
   medium: [
     "That angle took more planning than the outfit itself. The photo still chose violence anyway.",
@@ -616,6 +651,16 @@ function pushRecentMedium(text) {
   if (!text) return;
   recentMediumRoasts.push(text.toLowerCase());
   while (recentMediumRoasts.length > MAX_RECENT_MEDIUM) recentMediumRoasts.shift();
+}
+
+// Track recent mild roasts to penalize repetition across calls
+const recentMildRoasts = [];
+const MAX_RECENT_MILD = 20;
+
+function pushRecentMild(text) {
+  if (!text) return;
+  recentMildRoasts.push(text.toLowerCase());
+  while (recentMildRoasts.length > MAX_RECENT_MILD) recentMildRoasts.shift();
 }
 
 // Nuclear-v2 global anti-repeat helpers (reuse recentNuclearRoasts pool)
@@ -869,6 +914,18 @@ MEDIUM RULES:
 - No questions. No advice or commands. No "you should".
 - No emojis, no quote marks of any kind.
 - End on the joke. Screenshotable.`;
+  } else if (tierName === 'mild') {
+    tierRules = `
+MILD RULES:
+- Write EXACTLY one sentence. It MUST end with a period. No second sentence.
+- 8–14 words total.
+- Reference ONE visible detail (outfit, hair, pose, angle, background, expression, lighting).
+- Tone: light, playful, friendly tease. "Haha okay fair" energy.
+- No "you look like", no "looks like", no "vibe/energy/aura/it's giving/giving me".
+- No questions. No advice or commands.
+- No emojis, no quote marks of any kind.
+- No harsh or bleak language. Keep it Google Play safe.
+- End on the joke. Shareable.`;
   } else if (tierName === 'savage') {
     tierRules = `
 SAVAGE RULES (cold verdict + organic closer):
@@ -1061,8 +1118,8 @@ function validateRoast(text, tierName) {
   const reasons = [];
   const lower = text.toLowerCase();
 
-  // JSON contamination (skip for medium — plain text pipeline)
-  if (tierName !== 'medium') {
+  // JSON contamination (skip for mild/medium — plain text pipelines)
+  if (tierName !== 'medium' && tierName !== 'mild') {
     for (const m of JSON_MARKERS) {
       if (text.includes(m)) { reasons.push(`json-marker:${m}`); break; }
     }
@@ -1205,6 +1262,46 @@ function validateRoast(text, tierName) {
     ];
     const hasMediumVisual = hasVisual || mediumExtraVisual.some(kw => lower.includes(kw));
     if (!hasMediumVisual) reasons.push('medium-no-visual-detail');
+  }
+
+  // --- Mild-v2 validation ---
+  if (tierName === 'mild') {
+    const mlSentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+    const mlWordCount = text.trim().split(/\s+/).length;
+    // EXACTLY 1 sentence
+    if (mlSentences.length !== 1) reasons.push(`mild-sentenceCount:${mlSentences.length}/1`);
+    // 8–14 words total
+    if (mlWordCount > 14) reasons.push(`mild-too-many-words:${mlWordCount}/14`);
+    if (mlWordCount < 8) reasons.push(`mild-too-few-words:${mlWordCount}/8`);
+    // Max 120 chars
+    if (text.length > 120) reasons.push(`mild-too-long:${text.length}/120`);
+    // No questions
+    if (text.includes('?')) reasons.push('mild-question');
+    // No quotes (double straight + all curly) / emojis
+    if (/["\u201C\u201D\u2018\u2019]/.test(text)) reasons.push('mild-quotes');
+    if (/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FA9F}]/u.test(text)) reasons.push('mild-emoji');
+    // "you look like" / "looks like" ban
+    if (/\byou look like\b/i.test(text)) reasons.push('mild-you-look-like');
+    if (/\blooks like\b/i.test(text)) reasons.push('mild-looks-like');
+    // Advice/command ban: check first word against MILD_BANNED_OPENERS
+    const mlFw = text.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '') || '';
+    if (MILD_BANNED_OPENERS.includes(mlFw)) reasons.push(`mild-imperative:${mlFw}`);
+    // Template crutch ban
+    for (const crutch of MILD_TEMPLATE_CRUTCHES) {
+      if (lower.includes(crutch)) { reasons.push(`mild-crutch:${crutch}`); break; }
+    }
+    // Harsh language ban
+    for (const phrase of MILD_HARSH_WORDS) {
+      if (lower.includes(phrase)) { reasons.push(`mild-harsh:${phrase}`); break; }
+    }
+    // Visual detail check
+    const mildExtraVisual = [
+      'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
+      'frame', 'crop', 'angle', 'background', 'garage', 'palm',
+      'kitchen', 'room', 'grin', 'smile', 'teeth',
+    ];
+    const hasMildVisual = hasVisual || mildExtraVisual.some(kw => lower.includes(kw));
+    if (!hasMildVisual) reasons.push('mild-no-visual-detail');
   }
 
   // Nuclear-only: banned identity-erasure phrases (word-boundary regex)
@@ -1496,6 +1593,70 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
 
     // Tie-breaker
     score += text.length % 7;
+  }
+
+  // --- Mild-v2 scoring ---
+  if (tierName === 'mild') {
+    const mlWordCount = text.trim().split(/\s+/).length;
+
+    // Reward: word count sweet spot (10–12)
+    if (mlWordCount >= 10 && mlWordCount <= 12) score += 20;
+
+    // Reward: visual anchor token in sentence
+    const mlLower = text.toLowerCase();
+    const mildVisualScore = [
+      'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
+      'frame', 'crop', 'angle', 'background', 'garage', 'palm',
+      'kitchen', 'room', 'grin', 'smile', 'teeth',
+    ];
+    if (VISUAL_KEYWORDS.some(kw => mlLower.includes(kw)) || mildVisualScore.some(kw => mlLower.includes(kw))) {
+      score += 15;
+    }
+
+    // Reward: ends with a light punch (not a savage micdrop)
+    const mlLastWord = text.trim().replace(/[.!?]+$/, '').split(/\s+/).pop()?.toLowerCase() || '';
+    const lightPunchTokens = ['though', 'honestly', 'apparently', 'almost', 'barely', 'somehow', 'anyway'];
+    if (lightPunchTokens.some(t => mlLastWord.includes(t) || mlLower.endsWith(t + '.'))) score += 10;
+
+    // Penalize: high token overlap with recentMildRoasts (>0.5)
+    for (const prev of recentMildRoasts) {
+      if (tokenOverlap(text, prev) > 0.5) { score -= 30; break; }
+    }
+
+    // Penalize: generic filler words
+    for (const w of MILD_WEAK_WORDS) {
+      if (mlLower.includes(w)) { score -= 20; break; }
+    }
+
+    // Penalize: harsh language (even if not banned outright)
+    for (const w of MILD_HARSH_WORDS) {
+      if (mlLower.includes(w)) { score -= 20; break; }
+    }
+
+    // Penalize: template starters
+    if (/^when your\b/i.test(text)) score -= 25;
+    if (/^nothing says\b/i.test(text)) score -= 25;
+    if (/^pov\b/i.test(text)) score -= 25;
+    if (/^this is what happens\b/i.test(text)) score -= 25;
+
+    // Penalize: praise/compliment tokens (mild should tease, not motivate)
+    const MILD_PRAISE_TOKENS = [
+      'greatness', 'amazing', 'flawless', 'perfect', 'winning', 'legend',
+      'iconic', 'champion', 'impressive', 'proud', 'mean business', 'and life',
+    ];
+    for (const p of MILD_PRAISE_TOKENS) {
+      if (mlLower.includes(p)) { score -= 25; break; }
+    }
+
+    // Reward: gentle deflation tokens (light tease energy)
+    const MILD_DEFLATION_TOKENS = ['trying', 'almost', 'doing a lot', 'working overtime', 'carrying', 'in spirit', 'holding on'];
+    if (MILD_DEFLATION_TOKENS.some(t => mlLower.includes(t))) score += 10;
+
+    // Reward: starts with direct visual anchor
+    if (/^(that |the )?(lighting|angle|background|outfit|smile|grin|shirt|pose|expression|hair|hoodie|hat|glasses|shadow|framing)\b/i.test(text)) score += 10;
+
+    // Tie-breaker
+    score += text.length % 5;
   }
 
   // --- Nuclear-specific scoring ---
@@ -4000,6 +4161,147 @@ async function generateMediumV2({ imageBase64 }) {
   };
 }
 
+// --- Mild V2: single-winner candidate pipeline ---
+async function generateMildV2({ imageBase64 }) {
+  const isDev = process.env.NODE_ENV !== 'production';
+  const config = INTENSITY_CONFIG.mild;
+  const numCandidates = config.candidates || 8;
+  const rejectCounts = {};
+  const seen = new Set();
+  const fallbacks = FALLBACKS.mild;
+
+  // Style diversity: rotate hints per request
+  const styleHint = ' ' + MILD_STYLE_HINTS[Math.floor(Math.random() * MILD_STYLE_HINTS.length)];
+
+  // Avoid block: penalize repetition of recent outputs
+  const avoidBlock = recentMildRoasts.length > 0
+    ? `\n\nDO NOT REPEAT OR PARAPHRASE ANY OF THESE:\n${recentMildRoasts.slice(-15).map(r => `- ${r}`).join('\n')}`
+    : '';
+
+  // System message
+  const sysMsg = `You are a lighthearted roast comedian. Write EXACTLY one sentence about this photo. The sentence MUST end with a period. No second sentence. 8–14 words total. Reference ONE visible detail (outfit, hair, pose, angle, background, expression, lighting). Tone: gentle, playful, friendly tease — shareable without offense. No compliments or encouragement. If it reads supportive, rewrite as a light tease. NEVER use "you look like" or "looks like". No vibe/energy/aura. No questions. No advice or commands. No emojis. No quote marks. No harsh or bleak language. Plain text only — no JSON, no brackets, no labels.${styleHint}${avoidBlock}`;
+
+  // User prompt
+  const userPrompt = `Look at this selfie and write ONE gentle roast. Write EXACTLY one sentence. The sentence MUST end with a period. No second sentence. 8–14 words total. Reference something visible (outfit, hair, pose, angle, background, expression, lighting). Light and playful — "haha okay fair" energy. No compliments or encouragement. If it reads supportive, rewrite as a light tease. Plain text only — no JSON, no formatting, no labels, no numbering.`;
+
+  const imageContent = [
+    { type: 'input_text', text: userPrompt },
+    { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+  ];
+
+  const buildCallOpts = () => {
+    const opts = {
+      model: 'gpt-4o',
+      input: [
+        { role: 'system', content: sysMsg },
+        { role: 'user', content: imageContent },
+      ],
+    };
+    if (config.maxTokens) opts.max_output_tokens = config.maxTokens;
+    if (config.temperature != null) opts.temperature = config.temperature;
+    if (config.presence_penalty != null) opts.presence_penalty = config.presence_penalty;
+    if (config.frequency_penalty != null) opts.frequency_penalty = config.frequency_penalty;
+    if (config.top_p != null) opts.top_p = config.top_p;
+    return opts;
+  };
+
+  // Generate N candidates in parallel — one plain-text roast per call
+  const calls = Array.from({ length: numCandidates }, () =>
+    openai.responses.create(buildCallOpts())
+      .then(r => r.output_text)
+      .catch(() => null)
+  );
+  const outputs = await Promise.all(calls);
+
+  const candidates = [];
+  for (const raw of outputs) {
+    if (!raw) continue;
+
+    // Clean: strip code fences, JSON wrapping
+    let text = raw.trim()
+      .replace(/^```[\s\S]*?```$/g, '')
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```$/, '')
+      .trim();
+
+    // Salvage JSON-wrapped output
+    if (text.startsWith('{') || text.startsWith('[')) {
+      const salvaged = extractRoastText(text);
+      if (salvaged) {
+        text = salvaged;
+      } else {
+        rejectCounts['json-unwrap-fail'] = (rejectCounts['json-unwrap-fail'] || 0) + 1;
+        continue;
+      }
+    }
+
+    // Strip ALL quote characters (straight + curly)
+    text = text.replace(/["'\u201C\u201D\u2018\u2019]/g, '').replace(/\s+/g, ' ').trim();
+
+    // Repair common contractions broken by quote stripping
+    const CONTRACTION_FIXES = [
+      [/\bcant\b/gi, "can't"], [/\bwont\b/gi, "won't"], [/\bdont\b/gi, "don't"],
+      [/\bdoesnt\b/gi, "doesn't"], [/\bdidnt\b/gi, "didn't"], [/\bcouldnt\b/gi, "couldn't"],
+      [/\bwouldnt\b/gi, "wouldn't"], [/\bisnt\b/gi, "isn't"], [/\barent\b/gi, "aren't"],
+      [/\byoure\b/gi, "you're"], [/\byoull\b/gi, "you'll"], [/\byouve\b/gi, "you've"],
+      [/\bive\b/gi, "I've"], [/\bim\b/gi, "I'm"],
+      [/\bthats\b/gi, "that's"], [/\bwhats\b/gi, "what's"], [/\btheres\b/gi, "there's"],
+      [/\bits like\b/gi, "it's like"], [/\bits just\b/gi, "it's just"],
+      [/\bits almost\b/gi, "it's almost"], [/\bits as if\b/gi, "it's as if"],
+    ];
+    for (const [re, fix] of CONTRACTION_FIXES) {
+      text = text.replace(re, fix);
+    }
+
+    // Clamp to 1 sentence, 14 words
+    let clamped = clampRoast(text, config.maxSentences, config.maxChars, config.maxWords);
+    if (!clamped || clamped.length < 8) continue;
+    const sents = clamped.match(/[^.!?]*[.!?]+/g);
+    if (sents && sents.length > 1) clamped = sents[0].trim();
+    const words = clamped.trim().split(/\s+/);
+    if (words.length > 14) clamped = words.slice(0, 14).join(' ').trim();
+    if (!/[.!?]$/.test(clamped)) clamped += '.';
+    if (!clamped || clamped.length < 8) continue;
+
+    // Validate
+    const v = validateRoast(clamped, 'mild');
+    if (!v.valid) {
+      for (const reason of v.reasons.slice(0, 2)) {
+        rejectCounts[reason] = (rejectCounts[reason] || 0) + 1;
+      }
+      continue;
+    }
+
+    // Dedupe within request
+    const normKey = normalizeRoast(clamped);
+    if (seen.has(normKey)) continue;
+    seen.add(normKey);
+
+    // Score
+    const score = scoreRoast(clamped, 'mild');
+    candidates.push({ text: clamped, score });
+  }
+
+  // Sort by score descending, pick ONE winner
+  candidates.sort((a, b) => b.score - a.score);
+  const fallbackUsed = candidates.length === 0;
+  const winner = fallbackUsed
+    ? fallbacks[Math.floor(Math.random() * fallbacks.length)]
+    : candidates[0].text;
+  const winnerScore = fallbackUsed ? 0 : candidates[0].score;
+
+  return {
+    roast: winner,
+    meta: {
+      candidates: numCandidates,
+      valid: candidates.length,
+      rejectCounts,
+      winnerScore,
+      fallbackUsed,
+    },
+  };
+}
+
 app.post('/api/roast', async (req, res) => {
   try {
     const { imageBase64, level = 'medium', clientId, useSavageV2, sceneHints, safeTags } = req.body;
@@ -4168,6 +4470,19 @@ app.post('/api/roast', async (req, res) => {
       roasts = roasts.slice(0, config.count);
       if (isDev) {
         console.log(`[roast] level=${tierName} (v2) returned=${roasts.length} chars=${roasts[0]?.length || 0}`);
+      }
+      return res.json({ roasts });
+    }
+
+    // --- Mild V2 intercept: single-winner candidate pipeline ---
+    if (tierName === 'mild') {
+      const { roast, meta } = await generateMildV2({ imageBase64 });
+      roasts = [roast];
+      themes = [];
+      pushRecentMild(roast);
+      if (isDev) {
+        console.log(`[mild-v2] candidates=${meta.candidates} valid=${meta.valid} rejected=${JSON.stringify(meta.rejectCounts)}`);
+        console.log(`[mild-v2] winner score=${meta.winnerScore}${meta.fallbackUsed ? ' (fallback)' : ''} text="${roast}"`);
       }
       return res.json({ roasts });
     }
