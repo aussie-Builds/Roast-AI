@@ -63,7 +63,7 @@ const INTENSITY_CONFIG = {
     presence_penalty: 0.8,
     frequency_penalty: 0.5,
     style: 'cold verdict + micdrop — tight, humiliating, screenshot-ready',
-    format: 'TWO sentences, 12–22 words, s2 is micdrop from list; no list',
+    format: 'TWO sentences, 11–22 words, s2 is organic short closer (1–4 words); no fixed list',
   },
   nuclear: {
     count: 1,
@@ -438,12 +438,19 @@ const SAVAGE_PUNCH_ENDINGS = [
   'unfinished', 'unconvincing', 'secondhand',
 ];
 
-// Savage V2: micdrop punchlines (sentence 2 must match exactly)
-const SAVAGE_MICDROPS = [
-  'Sit down.', 'Delete it.', 'Be serious.', 'Try again.', 'Log off.',
-  'Wrong audience.', 'Stay in drafts.', 'Not today.', 'Case closed.',
+// Savage V2: strong closing words for organic micdrop scoring (sentence 2)
+const SAVAGE_MICDROP_STRONG_WORDS = [
+  'audience', 'drafts', 'private', 'enough', 'mistake',
+  'embarrassing', 'serious', 'subtle', 'subtlety', 'convincing',
+  'believable', 'bold', 'careful', 'awkward', 'unfortunate', 'choice',
+  'pass', 'refund', 'declined', 'quiet', 'silence', 'visible',
+  'noted', 'obvious', 'permanent', 'unrecoverable', 'tragic',
 ];
-const SAVAGE_MICDROP_SET = new Set(SAVAGE_MICDROPS.map(m => m.toLowerCase()));
+const SAVAGE_MICDROP_WEAK_WORDS = ['nice', 'okay', 'fine', 'maybe', 'perhaps', 'probably'];
+// Imperative verbs banned from sentence 2 start (commands aren't micdrops)
+const SAVAGE_S2_BANNED_IMPERATIVES = [
+  'delete', 'log', 'stop', 'quit', 'try', 'go', 'leave', 'get', 'fix', 'change', 'do',
+];
 
 // Savage V2: verdict framing starters for sentence 1 (scoring bonus)
 const SAVAGE_VERDICT_STARTERS = [
@@ -816,10 +823,10 @@ MEDIUM RULES:
 - End on the joke.`;
   } else if (tierName === 'savage') {
     tierRules = `
-SAVAGE RULES (cold verdict + micdrop):
-- EXACTLY 2 sentences. 12–22 words total.
+SAVAGE RULES (cold verdict + organic closer):
+- EXACTLY 2 sentences. 11–22 words total.
 - Sentence 1: cold verdict about their decision-making or self-perception, referencing ONE visible detail (outfit, posture, expression, hair, angle, lighting, background, etc.). Use "you" statements.
-- Sentence 2: micdrop punchline. Must be EXACTLY one of: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed.
+- Sentence 2: short decisive closer (1–4 words). Ends with a period. NOT a question, NOT a command, NOT advice. Must NOT contain "you" or "your". Should be specific to what's visible in the photo. Think verdict fragments like "Hard pass." "Not convincing." "Room went quiet." "Payment declined." — but write your own, do not copy these examples.
 - No questions. No advice. No imperatives in sentence 1.
 - No emojis, no quotes (no ' or "), no hashtags.
 - NEVER use the phrase "you look like" or "looks like". These are banned.
@@ -1022,7 +1029,18 @@ function validateRoast(text, tierName) {
 
   // Must reference a visible detail (hard-fail for savage, scoring penalty for nuclear)
   const hasVisual = VISUAL_KEYWORDS.some(kw => lower.includes(kw));
-  if (!hasVisual && tierName !== 'nuclear') reasons.push('no-visual-detail');
+  // Savage gets an expanded visual check: base VISUAL_KEYWORDS + extra scene/attribute tokens
+  if (tierName === 'savage') {
+    const savageExtraVisual = [
+      'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
+      'frame', 'crop', 'angle', 'background', 'garage', 'palm',
+      'kitchen', 'room', 'grin', 'smile', 'teeth',
+    ];
+    const hasSavageVisual = hasVisual || savageExtraVisual.some(kw => lower.includes(kw));
+    if (!hasSavageVisual) reasons.push('no-visual-detail');
+  } else if (tierName !== 'nuclear') {
+    if (!hasVisual) reasons.push('no-visual-detail');
+  }
 
   // Savage-v2 validation (cold verdict + micdrop — 2-sentence contract)
   if (tierName === 'savage') {
@@ -1032,13 +1050,19 @@ function validateRoast(text, tierName) {
     if (sSentences.length !== 2) reasons.push(`savage-sentenceCount:${sSentences.length}/2`);
     // 12–22 words total
     if (savageWordCount > 22) reasons.push(`savage-too-many-words:${savageWordCount}/22`);
-    if (savageWordCount < 12) reasons.push(`savage-too-few-words:${savageWordCount}/12`);
-    // Sentence 2: micdrop must be 1–4 words and match SAVAGE_MICDROPS
+    if (savageWordCount < 11) reasons.push(`savage-too-few-words:${savageWordCount}/11`);
+    // Sentence 2: organic closer — 1–4 words, ends with period, no commands, no "you"/"your"
     if (sSentences.length === 2) {
       const s2 = sSentences[1].trim();
+      const s2Lower = s2.toLowerCase();
       const s2Wc = s2.split(/\s+/).length;
       if (s2Wc < 1 || s2Wc > 4) reasons.push(`savage-s2-wordCount:${s2Wc}/1-4`);
-      if (!SAVAGE_MICDROP_SET.has(s2.toLowerCase())) reasons.push('savage-s2-not-micdrop');
+      if (!s2.endsWith('.')) reasons.push('savage-s2-no-period');
+      if (s2.includes('?')) reasons.push('savage-s2-question');
+      if (/["\u201C\u201D\u2018\u2019]/.test(s2)) reasons.push('savage-s2-quotes');
+      if (/\byou(r|'re|'ve|'ll)?\b/i.test(s2)) reasons.push('savage-s2-you');
+      const s2FirstWord = s2.split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '') || '';
+      if (SAVAGE_S2_BANNED_IMPERATIVES.includes(s2FirstWord)) reasons.push(`savage-s2-imperative:${s2FirstWord}`);
     }
     // No questions
     if (text.includes('?')) reasons.push('savage-question');
@@ -1066,10 +1090,7 @@ function validateRoast(text, tierName) {
       const re = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
       if (re.test(text)) { reasons.push(`savage-nuclear-banned:${phrase}`); break; }
     }
-    // Crutch phrases (AI-template phrasing)
-    for (const crutch of SAVAGE_CRUTCHES) {
-      if (lower.includes(crutch)) { reasons.push(`savage-crutch:${crutch}`); break; }
-    }
+    // Crutch phrases: moved from hard-reject to score penalty (see scoreRoast)
     // Bleak/defeated language
     for (const term of SAVAGE_BLEAK) {
       if (lower.includes(term)) { reasons.push(`savage-bleak:${term}`); break; }
@@ -1221,10 +1242,23 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
     if (sentences.length === 2) score += 25;
     else score -= 20;
 
-    // Reward: s2 matches micdrop list
+    // Organic closer scoring for s2
     if (sentences.length === 2) {
-      const s2 = sentences[1].trim().toLowerCase();
-      if (SAVAGE_MICDROP_SET.has(s2)) score += 25;
+      const s2 = sentences[1].trim();
+      const s2Lower = s2.toLowerCase();
+      const s2Wc = s2.split(/\s+/).length;
+      // Reward: sweet-spot closer (2–3 words)
+      if (s2Wc >= 2 && s2Wc <= 3) score += 20;
+      // Reward: acceptable closer (1 or 4 words)
+      else if (s2Wc === 1 || s2Wc === 4) score += 10;
+      // Reward: strong closing words (nouns/adjectives)
+      if (SAVAGE_MICDROP_STRONG_WORDS.some(w => s2Lower.includes(w))) score += 20;
+      // Extra bonus: 2–3 words AND contains strong word (ideal closer shape)
+      if (s2Wc >= 2 && s2Wc <= 3 && SAVAGE_MICDROP_STRONG_WORDS.some(w => s2Lower.includes(w))) score += 10;
+      // Penalize: weak filler
+      if (SAVAGE_MICDROP_WEAK_WORDS.some(w => s2Lower.includes(w))) score -= 15;
+      // Penalize: s2 contains "you" / "your" (closer should be impersonal)
+      if (/\byou(r|'re|'ve|'ll)?\b/i.test(s2)) score -= 15;
     }
 
     // Reward: s1 starts with verdict framing
@@ -1249,11 +1283,23 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
     if (wordCount >= 14 && wordCount <= 18) score += 5;
     else if (wordCount < 14 || wordCount > 18) score -= 5;
 
-    // Penalize: template crutches
+    // Penalize: template crutches (hard-banned in validation stay harsh here too)
     if (/\byou look like\b/i.test(text)) score -= 40;
     if (/\bscreams\b/i.test(text)) score -= 40;
-    // Soft penalty: "but the" in sentence 1 (removed from hard-reject crutch list)
+    // Soft penalty: "but the" in sentence 1
     if (sentences.length >= 1 && sentences[0].toLowerCase().includes('but the')) score -= 15;
+
+    // Penalize: crutch phrases (moved from hard-reject to scoring)
+    if (lower.includes('but your')) score -= 20;
+    if (/\bvibes?\b/.test(lower)) score -= 20;
+    {
+      let crutchPenalty = 0;
+      for (const crutch of SAVAGE_CRUTCHES) {
+        if (crutch === 'but your' || crutch === 'vibes') continue; // already penalized above
+        if (lower.includes(crutch)) crutchPenalty += 10;
+      }
+      score -= Math.min(crutchPenalty, 30);
+    }
 
     // Penalize: overused tokens
     let overusedPenalty = 0;
@@ -3681,7 +3727,7 @@ app.post('/api/roast', async (req, res) => {
     }
 
     const systemMsg = tierName === 'savage'
-      ? `You are a roast comedian. EXACTLY 2 sentences. 12–22 words total. Sentence 1: cold verdict referencing ONE visible detail, using "you" statements. Sentence 2: micdrop from this list ONLY: Sit down. / Delete it. / Be serious. / Try again. / Log off. / Wrong audience. / Stay in drafts. / Not today. / Case closed. No questions. No advice. No emojis. No quote marks of any kind. NEVER use the phrase "you look like" or "looks like" — these are banned. Do not use "screams" or "your expression". Prefer verdict-framing starters for sentence 1: "You posted this like …", "You framed this like …", "You aimed for …", "This isn't …", "Not a flex …", "You called this …". No existential despair.${savageStyleHint} Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
+      ? `You are a roast comedian. EXACTLY 2 sentences. 11–22 words total. Sentence 1: cold verdict referencing ONE visible detail, using "you" statements. Sentence 2: short decisive closer (1–4 words), ending with a period. NOT a question, NOT a command, NOT advice. Must NOT contain "you" or "your". Should be specific to what's visible in the photo — think verdict fragments like "Hard pass." or "Not convincing." but write your own. No emojis. No quote marks of any kind. NEVER use the phrase "you look like" or "looks like" — these are banned. Do not use "screams" or "your expression". Prefer verdict-framing starters for sentence 1: "You posted this like …", "You framed this like …", "You aimed for …", "This isn't …", "Not a flex …", "You called this …". No existential despair.${savageStyleHint} Respond with ONLY valid JSON. No markdown. No code fences.${savageAvoidBlock}`
       : tierName === 'nuclear'
         ? `You are a ruthless roast comedian specializing in social humiliation, not descriptive insults. The goal is exposing delusion in front of an audience. Write exactly 1–2 sentences total. No third sentence. No colon-style closer. Sentence 1: visual/trait observation — anchor on something visible (angle/hair/hoodie/posture, max 12 words). Sentence 2 (if present): social verdict — reference audience perception (anyone/people/everyone/nobody/they/buying it/fooled) OR a room-reaction phrase (the room/the whole room/anyone watching). Sentence 2 MUST NOT start with "You". BANNED WORDS: imagine, expect, insist, assume, pretend. BANNED PHRASES: "does you no favors", "isn't doing you any favors", "your expression", "the lighting". Do not use these under any circumstances.${nuclearStyleHint}${nuclearLaneBlock} Do NOT rely on "tired/drained/low energy/low battery" as the main punch. One safe absurd kicker allowed occasionally (e.g., "even the garage door isn't impressed" / "your RGB wants a refund") but avoid dehumanization and worthlessness. Avoid poetic metaphors. Cold and cutting. No existential despair. No "nobody cares" or "forgettable". Avoid substance references (hungover/drunk/high). Avoid diagnosis/therapy wording. Avoid "warning sign" phrasing. Avoid "screams" and "you clearly" templates. Avoid words like "detected", "confirmed", "exposed", "analyzed". FORMAT: output 1–2 sentences. No line breaks, no bullet points, no ellipsis-only fragments. Aim for 60–160 characters total. Respond with ONLY valid JSON: {"roasts":["Your sentences here."]}. No markdown. No code fences. No explanations.${nuclearAvoidBlock}`
         : `You are a sharp, observational roast comedian. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanations.`;
@@ -3896,16 +3942,20 @@ app.post('/api/roast', async (req, res) => {
       }
 
       // Round 2: if all failed or best score too low, retry with harder prompt
+      // Savage: skip round2 when we already have >= 2 valid candidates
       const bestScore = candidates.length > 0
         ? Math.max(...candidates.map(c => c.score))
         : -1;
 
-      if (candidates.length === 0 || bestScore < 30) {
+      const needsRound2 = tierName === 'savage'
+        ? candidates.length < 2
+        : (candidates.length === 0 || bestScore < 30);
+      if (needsRound2) {
         if (isDev) console.log(`[${tierName}] round1 weak (count=${candidates.length}, bestScore=${bestScore}), triggering round2`);
         const harderSys = tierName === 'nuclear'
           ? systemMsg + ` BE HARSHER. Exactly 3 sentences. Sentence 1: vivid visual anchor (max 12 words). Sentence 2: ego hit using "you" statements (max 16 words). Sentence 3: knockout closer (2–5 words, caption-like). No questions. No filler. JSON ONLY.`
           : tierName === 'savage'
-            ? systemMsg + ` EXACTLY 2 sentences. 12–22 words. Sentence 1: cold verdict about ONE visible thing. NEVER use "you look like" or "looks like". Sentence 2: pick one micdrop from: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. JSON ONLY.`
+            ? systemMsg + ` EXACTLY 2 sentences. 11–22 words. Sentence 1: cold verdict about ONE visible thing. NEVER use "you look like" or "looks like". Sentence 2: short decisive closer (1–4 words) ending with period. Not a command. Not a question. No "you"/"your". Specific to the photo. JSON ONLY.`
             : systemMsg + ` BE MUCH SHORTER. RESPOND WITH ONLY JSON. NO ESSAYS.`;
         const round2 = await generateCandidates(harderSys);
         if (isDev) console.log(`[${tierName}] round2: ${round2.length} valid candidates`);
@@ -3934,13 +3984,13 @@ app.post('/api/roast', async (req, res) => {
         }
       }
 
-      // --- Savage round 3: last-ditch retry before fallback ---
-      if (tierName === 'savage' && candidates.length === 0) {
-        if (isDev) console.log(`[savage-v2] round1+2 empty, triggering round3 rewrite`);
-        const rewriteSys = systemMsg + ` EXACTLY 2 sentences. Sentence 1: cold verdict about ONE visible detail. NEVER use "you look like" or "looks like". Sentence 2: MUST be one of: Sit down / Delete it / Be serious / Try again / Log off / Wrong audience / Stay in drafts / Not today / Case closed. Avoid repeating prior roasts. JSON ONLY.`;
+      // --- Savage round 3: last-ditch retry before fallback (only when starved) ---
+      if (tierName === 'savage' && candidates.length < 2) {
+        if (isDev) console.log(`[savage-v2] round1+2 starved (have ${candidates.length}), triggering round3 rewrite`);
+        const rewriteSys = systemMsg + ` EXACTLY 2 sentences. 11–22 words. Sentence 1: cold verdict about ONE visible detail. NEVER use "you look like" or "looks like". Sentence 2: short decisive closer (1–4 words) ending with period. Not a command. Not a question. No "you"/"your". Specific to the photo. Avoid repeating prior roasts. JSON ONLY.`;
         const round3 = await generateCandidates(rewriteSys);
         if (isDev) console.log(`[savage-v2] round3: ${round3.length} valid candidates`);
-        candidates = round3;
+        candidates = candidates.concat(round3);
       }
 
       // --- Nuclear round 3: relaxed retry (allow 2–3 sentences, lower temp) ---
@@ -4033,10 +4083,10 @@ app.post('/api/roast', async (req, res) => {
           if (tierName === 'savage') {
             const _svSents = best.text.match(/[^.!?]*[.!?]+/g) || [best.text];
             const _svS2 = _svSents.length >= 2 ? _svSents[1].trim() : '';
-            const _svMicdropMatch = SAVAGE_MICDROP_SET.has(_svS2.toLowerCase());
+            const _svS2Wc = _svS2.split(/\s+/).filter(w => w).length;
             const _svWc = best.text.trim().split(/\s+/).length;
             console.log(`[savage-v2] winner score=${best.score} text="${best.text}"`);
-            console.log(`[savage-v2] anchor=${detectSavageAnchor(best.text)} structure=${detectSavageStructure(best.text)} s2="${_svS2}" micdropMatch=${_svMicdropMatch} wordCount=${_svWc}`);
+            console.log(`[savage-v2] anchor=${detectSavageAnchor(best.text)} structure=${detectSavageStructure(best.text)} s2="${_svS2}" s2words=${_svS2Wc} wordCount=${_svWc}`);
           }
           if (tierName === 'nuclear') {
             const _candNorm = normalizeForOverlap(nuclearBodyText || best.text);
