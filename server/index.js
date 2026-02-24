@@ -45,10 +45,19 @@ const INTENSITY_CONFIG = {
     format: 'short one-liners',
   },
   medium: {
-    count: 5,
+    count: 1,
     minChars: 0,
-    style: 'playful, teasing, clever',
-    format: 'short punchy lines (1–2 sentences each, 15–35 words)',
+    candidates: 12,
+    maxSentences: 2,
+    maxChars: 200,
+    maxWords: 22,
+    maxTokens: 80,
+    temperature: 1.0,
+    top_p: 0.92,
+    presence_penalty: 0.6,
+    frequency_penalty: 0.4,
+    style: 'clever, social embarrassment, effort mismatch — an "oof" moment',
+    format: 'EXACTLY 2 sentences, 14–22 words, screenshotable',
   },
   savage: {
     count: 1,
@@ -452,6 +461,30 @@ const SAVAGE_S2_BANNED_IMPERATIVES = [
   'delete', 'log', 'stop', 'quit', 'try', 'go', 'leave', 'get', 'fix', 'change', 'do',
 ];
 
+// --- Medium V2 constants ---
+const MEDIUM_BANNED_OPENERS = [
+  'try', 'fix', 'go', 'stop', 'get', 'change', 'should', 'need', 'learn',
+];
+
+const MEDIUM_TEMPLATE_CRUTCHES = [
+  'your vibe', 'energy', 'aura', "it's giving", 'giving off', 'vibes', 'giving me',
+];
+
+const MEDIUM_EFFORT_WORDS = [
+  'rehearsed', 'trying', 'flex', 'posed', 'staged', 'confident', 'glow-up',
+  'comeback', 'thought this was', 'called this', 'effort', 'practice',
+];
+
+const MEDIUM_WEAK_WORDS = ['nice', 'okay', 'fine', 'kinda', 'maybe'];
+
+// Medium V2: style diversity hints (rotated per request)
+const MEDIUM_STYLE_HINTS = [
+  'Style: effort mismatch — the preparation was visible but the result fell short.',
+  'Style: social read — describe what others would notice seeing this photo.',
+  'Style: quiet cringe — the secondhand embarrassment is the punchline.',
+  'Style: unearned confidence — the swagger exceeded the substance.',
+];
+
 // Savage V2: verdict framing starters for sentence 1 (scoring bonus)
 const SAVAGE_VERDICT_STARTERS = [
   'you posted this', 'you framed this', 'you aimed for',
@@ -487,13 +520,13 @@ const FALLBACKS = {
     "Bless your heart, you really tried with that angle.",
   ],
   medium: [
-    "You look like autocorrect keeps changing your name to something better.",
-    "That outfit screams 'I dressed in the dark and called it a vibe.'",
-    "Your confidence is inspirational — completely unearned, but inspirational.",
-    "You have the energy of a participation trophy giving a TED talk.",
-    "Everything about this photo says 'close enough.'",
-    "You look like your inner monologue needs subtitles.",
-    "Your vibe is buffering.",
+    "That angle took more planning than the outfit itself. The photo still chose violence anyway.",
+    "You posed like this was going on a billboard. The background tells a different story.",
+    "The confidence came through but the execution did not. Everyone can see the gap.",
+    "You dressed for an occasion that clearly never arrived. The outfit is still waiting.",
+    "This took multiple attempts and somehow this won the audition. The bar was underground.",
+    "The lighting is carrying this entire photo on its back. Everything else showed up empty.",
+    "That smile says rehearsed but the result says unrehearsed. The camera caught every bit of it.",
   ],
   savage: [
     "You posted this like it was a flex and it absolutely was not. Sit down.",
@@ -573,6 +606,16 @@ function pushRecentNuclear(text) {
   if (!text) return;
   recentNuclearRoasts.push(text.toLowerCase());
   while (recentNuclearRoasts.length > MAX_RECENT_NUCLEAR) recentNuclearRoasts.shift();
+}
+
+// Track recent medium roasts to penalize repetition across calls
+const recentMediumRoasts = [];
+const MAX_RECENT_MEDIUM = 25;
+
+function pushRecentMedium(text) {
+  if (!text) return;
+  recentMediumRoasts.push(text.toLowerCase());
+  while (recentMediumRoasts.length > MAX_RECENT_MEDIUM) recentMediumRoasts.shift();
 }
 
 // Nuclear-v2 global anti-repeat helpers (reuse recentNuclearRoasts pool)
@@ -817,10 +860,15 @@ function buildPrompt(config, tierName, avoidThemes) {
   if (tierName === 'medium') {
     tierRules = `
 MEDIUM RULES:
-- 1–2 sentences per roast. 15–35 words each.
-- Tone: playful, teasing, clever. Observational humour.
-- Light punch, not brutal. No life insults.
-- End on the joke.`;
+- Write EXACTLY two sentences. Sentence 1 MUST end with a period. Sentence 2 MUST end with a period. No third sentence.
+- 14–22 words total.
+- Sentence 1: reference ONE visible detail (outfit, hair, pose, angle, background, expression, lighting).
+- Sentence 2: escalate with social embarrassment or effort mismatch — the "oof" moment. NOT a short 2–3 word micdrop. Both sentences carry weight. Sentence 2 must be at least 4 words.
+- Attack the decision or effort, not existence.
+- No "you look like", no "looks like", no "vibe/energy/aura/it's giving/giving me".
+- No questions. No advice or commands. No "you should".
+- No emojis, no quote marks of any kind.
+- End on the joke. Screenshotable.`;
   } else if (tierName === 'savage') {
     tierRules = `
 SAVAGE RULES (cold verdict + organic closer):
@@ -1013,9 +1061,11 @@ function validateRoast(text, tierName) {
   const reasons = [];
   const lower = text.toLowerCase();
 
-  // JSON contamination
-  for (const m of JSON_MARKERS) {
-    if (text.includes(m)) { reasons.push(`json-marker:${m}`); break; }
+  // JSON contamination (skip for medium — plain text pipeline)
+  if (tierName !== 'medium') {
+    for (const m of JSON_MARKERS) {
+      if (text.includes(m)) { reasons.push(`json-marker:${m}`); break; }
+    }
   }
 
   // Banned soft/therapy language
@@ -1095,6 +1145,66 @@ function validateRoast(text, tierName) {
     for (const term of SAVAGE_BLEAK) {
       if (lower.includes(term)) { reasons.push(`savage-bleak:${term}`); break; }
     }
+  }
+
+  // --- Medium-v2 validation ---
+  if (tierName === 'medium') {
+    const mSentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+    const mWordCount = text.trim().split(/\s+/).length;
+    // EXACTLY 2 sentences
+    if (mSentences.length !== 2) reasons.push(`medium-sentenceCount:${mSentences.length}/2`);
+    // 14–22 words total
+    if (mWordCount > 22) reasons.push(`medium-too-many-words:${mWordCount}/22`);
+    if (mWordCount < 14) reasons.push(`medium-too-few-words:${mWordCount}/14`);
+    // Max 200 chars
+    if (text.length > 200) reasons.push(`medium-too-long:${text.length}/200`);
+    // No questions
+    if (text.includes('?')) reasons.push('medium-question');
+    // No quotes (double straight + all curly — straight apostrophe ' allowed for contractions) / emojis
+    if (/["\u201C\u201D\u2018\u2019]/.test(text)) reasons.push('medium-quotes');
+    if (/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FA9F}]/u.test(text)) reasons.push('medium-emoji');
+    // "you look like" / "looks like" ban
+    if (/\byou look like\b/i.test(text)) reasons.push('medium-you-look-like');
+    if (/\blooks like\b/i.test(text)) reasons.push('medium-looks-like');
+    // "you should" phrase ban
+    if (/\byou should\b/i.test(text)) reasons.push('medium-imperative:you-should');
+    // Advice/command ban: check first word of each sentence against MEDIUM_BANNED_OPENERS
+    for (const sent of mSentences) {
+      const fw = sent.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z]/g, '') || '';
+      if (MEDIUM_BANNED_OPENERS.includes(fw)) { reasons.push(`medium-imperative:${fw}`); break; }
+    }
+    // Template crutch ban (hard reject)
+    for (const crutch of MEDIUM_TEMPLATE_CRUTCHES) {
+      if (lower.includes(crutch)) { reasons.push(`medium-crutch:${crutch}`); break; }
+    }
+    // Short micdrop ban: sentence 2 must be >3 words (reserve short closers for savage/nuclear)
+    if (mSentences.length === 2) {
+      const s2 = mSentences[1].trim();
+      const s2Wc = s2.split(/\s+/).length;
+      if (s2Wc <= 3) reasons.push(`medium-short-micdrop:${s2Wc}`);
+    }
+    // Worthlessness/identity-erasure safety bans (reuse nuclear lists)
+    for (const phrase of NUCLEAR_BANNED_WORTHLESSNESS) {
+      const re = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`medium-worthlessness:${phrase}`); break; }
+    }
+    for (const phrase of NUCLEAR_BANNED) {
+      const re = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (re.test(text)) { reasons.push(`medium-nuclear-banned:${phrase}`); break; }
+    }
+    // Bleak/existential drift ban (medium should be "oof" not "damn")
+    const MEDIUM_BLEAK_PHRASES = ['about life', 'better days', 'existential', 'depressing', 'nobody cares'];
+    for (const phrase of MEDIUM_BLEAK_PHRASES) {
+      if (lower.includes(phrase)) { reasons.push(`medium-bleak:${phrase}`); break; }
+    }
+    // Visual detail check (same expanded check as savage)
+    const mediumExtraVisual = [
+      'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
+      'frame', 'crop', 'angle', 'background', 'garage', 'palm',
+      'kitchen', 'room', 'grin', 'smile', 'teeth',
+    ];
+    const hasMediumVisual = hasVisual || mediumExtraVisual.some(kw => lower.includes(kw));
+    if (!hasMediumVisual) reasons.push('medium-no-visual-detail');
   }
 
   // Nuclear-only: banned identity-erasure phrases (word-boundary regex)
@@ -1327,6 +1437,65 @@ function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clie
 
     // Tie-breaker
     score -= text.length % 7;
+  }
+
+  // --- Medium-v2 scoring ---
+  if (tierName === 'medium') {
+    const mSentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+    const mWordCount = text.trim().split(/\s+/).length;
+
+    // Reward: exactly 2 sentences
+    if (mSentences.length === 2) score += 25;
+
+    // Reward: s1 contains visual anchor
+    if (mSentences.length >= 1) {
+      const s1Lower = mSentences[0].trim().toLowerCase();
+      const mediumExtraVisualScore = [
+        'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
+        'frame', 'crop', 'angle', 'background', 'garage', 'palm',
+        'kitchen', 'room', 'grin', 'smile', 'teeth',
+      ];
+      if (VISUAL_KEYWORDS.some(kw => s1Lower.includes(kw)) || mediumExtraVisualScore.some(kw => s1Lower.includes(kw))) {
+        score += 15;
+      }
+    }
+
+    // Reward: s2 contains effort-mismatch language
+    if (mSentences.length >= 2) {
+      const s2Lower = mSentences[1].trim().toLowerCase();
+      if (MEDIUM_EFFORT_WORDS.some(w => s2Lower.includes(w))) score += 10;
+    }
+
+    // Word count sweet spot (16–20)
+    if (mWordCount >= 16 && mWordCount <= 20) score += 10;
+
+    // Penalize: crutch tokens (vibe/energy/aura/giving), capped -30
+    {
+      let crutchPenalty = 0;
+      for (const c of MEDIUM_TEMPLATE_CRUTCHES) {
+        if (lower.includes(c)) crutchPenalty += 20;
+      }
+      score -= Math.min(crutchPenalty, 30);
+    }
+
+    // Penalize: high token overlap with recentMediumRoasts (>0.5)
+    for (const prev of recentMediumRoasts) {
+      if (tokenOverlap(text, prev) > 0.5) { score -= 30; break; }
+    }
+
+    // Penalize: s2 is <=3 words (short micdrop — reserve for savage/nuclear)
+    if (mSentences.length >= 2) {
+      const s2Wc = mSentences[1].trim().split(/\s+/).length;
+      if (s2Wc <= 3) score -= 20;
+    }
+
+    // Penalize: generic filler words
+    for (const w of MEDIUM_WEAK_WORDS) {
+      if (lower.includes(w)) { score -= 15; break; }
+    }
+
+    // Tie-breaker
+    score += text.length % 7;
   }
 
   // --- Nuclear-specific scoring ---
@@ -3644,6 +3813,193 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
   };
 }
 
+// --- Medium V2: single-winner candidate pipeline ---
+async function generateMediumV2({ imageBase64 }) {
+  const isDev = process.env.NODE_ENV !== 'production';
+  const config = INTENSITY_CONFIG.medium;
+  const numCandidates = config.candidates || 12;
+  const rejectCounts = {};
+  const seen = new Set();
+  const fallbacks = FALLBACKS.medium;
+
+  // Style diversity: rotate hints per request
+  const styleHint = ' ' + MEDIUM_STYLE_HINTS[Math.floor(Math.random() * MEDIUM_STYLE_HINTS.length)];
+
+  // Avoid block: penalize repetition of recent outputs
+  const avoidBlock = recentMediumRoasts.length > 0
+    ? `\n\nDO NOT REPEAT OR PARAPHRASE ANY OF THESE:\n${recentMediumRoasts.slice(-20).map(r => `- ${r}`).join('\n')}`
+    : '';
+
+  // System message
+  const sysMsg = `You are a sharp roast comedian. Write EXACTLY two sentences about this photo. Sentence 1 MUST end with a period. Sentence 2 MUST end with a period. No third sentence. 14–22 words total. Sentence 1: reference ONE visible detail (outfit, hair, pose, angle, background, expression, lighting). Sentence 2: escalate with social embarrassment or effort mismatch — the "oof" moment. Sentence 2 must be at least 4 words — NOT a short 2–3 word closer. Both sentences carry weight. NEVER use "you look like" or "looks like". No vibe/energy/aura. No questions. No advice or commands. No emojis. No quote marks. Plain text only — no JSON, no brackets, no labels.${styleHint}${avoidBlock}`;
+
+  // User prompt
+  const userPrompt = `Look at this selfie and write ONE roast. Write EXACTLY two sentences. Sentence 1 MUST end with a period. Sentence 2 MUST end with a period. No third sentence. 14–22 words total. Sentence 1: call out something visible (outfit, hair, pose, angle, background, expression, lighting). Sentence 2: escalate with social embarrassment or effort mismatch — at least 4 words, both sentences carry weight. Plain text only — no JSON, no formatting, no labels, no numbering.`;
+
+  const imageContent = [
+    { type: 'input_text', text: userPrompt },
+    { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+  ];
+
+  const buildCallOpts = () => {
+    const opts = {
+      model: 'gpt-4o',
+      input: [
+        { role: 'system', content: sysMsg },
+        { role: 'user', content: imageContent },
+      ],
+    };
+    if (config.maxTokens) opts.max_output_tokens = config.maxTokens;
+    if (config.temperature != null) opts.temperature = config.temperature;
+    if (config.presence_penalty != null) opts.presence_penalty = config.presence_penalty;
+    if (config.frequency_penalty != null) opts.frequency_penalty = config.frequency_penalty;
+    if (config.top_p != null) opts.top_p = config.top_p;
+    return opts;
+  };
+
+  // Generate N candidates in parallel — one plain-text roast per call
+  const calls = Array.from({ length: numCandidates }, () =>
+    openai.responses.create(buildCallOpts())
+      .then(r => r.output_text)
+      .catch(() => null)
+  );
+  const outputs = await Promise.all(calls);
+
+  const candidates = [];
+  for (const raw of outputs) {
+    if (!raw) continue;
+
+    // Clean: strip code fences, JSON wrapping, surrounding quotes
+    let text = raw.trim()
+      .replace(/^```[\s\S]*?```$/g, '')
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```$/, '')
+      .trim();
+
+    // Salvage JSON-wrapped output
+    if (text.startsWith('{') || text.startsWith('[')) {
+      const salvaged = extractRoastText(text);
+      if (salvaged) {
+        text = salvaged;
+      } else {
+        rejectCounts['json-unwrap-fail'] = (rejectCounts['json-unwrap-fail'] || 0) + 1;
+        continue;
+      }
+    }
+
+    // Strip ALL quote characters (straight + curly) before validation to reduce medium-quotes rejects
+    text = text.replace(/["'\u201C\u201D\u2018\u2019]/g, '').replace(/\s+/g, ' ').trim();
+
+    // Repair common contractions broken by quote stripping (word-boundary safe)
+    const CONTRACTION_FIXES = [
+      [/\bcant\b/gi, "can't"], [/\bwont\b/gi, "won't"], [/\bdont\b/gi, "don't"],
+      [/\bdoesnt\b/gi, "doesn't"], [/\bdidnt\b/gi, "didn't"], [/\bcouldnt\b/gi, "couldn't"],
+      [/\bwouldnt\b/gi, "wouldn't"], [/\bisnt\b/gi, "isn't"], [/\barent\b/gi, "aren't"],
+      [/\byoure\b/gi, "you're"], [/\byoull\b/gi, "you'll"], [/\byouve\b/gi, "you've"],
+      [/\bive\b/gi, "I've"], [/\bim\b/gi, "I'm"],
+      [/\bthats\b/gi, "that's"], [/\bwhats\b/gi, "what's"], [/\btheres\b/gi, "there's"],
+      [/\bits like\b/gi, "it's like"], [/\bits just\b/gi, "it's just"],
+      [/\bits almost\b/gi, "it's almost"], [/\bits as if\b/gi, "it's as if"],
+    ];
+    for (const [re, fix] of CONTRACTION_FIXES) {
+      text = text.replace(re, fix);
+    }
+
+    // Clamp to 2 sentences, 22 words
+    let clamped = clampRoast(text, config.maxSentences, config.maxChars, config.maxWords);
+    if (!clamped || clamped.length < 10) continue;
+    const sents = clamped.match(/[^.!?]*[.!?]+/g);
+    if (sents && sents.length > 2) clamped = sents.slice(0, 2).map(s => s.trim()).join(' ');
+    const words = clamped.trim().split(/\s+/);
+    if (words.length > 22) clamped = words.slice(0, 22).join(' ').trim();
+    if (!/[.!?]$/.test(clamped)) clamped += '.';
+    if (!clamped || clamped.length < 10) continue;
+
+    // Validate
+    const v = validateRoast(clamped, 'medium');
+    if (!v.valid) {
+      for (const reason of v.reasons.slice(0, 2)) {
+        rejectCounts[reason] = (rejectCounts[reason] || 0) + 1;
+      }
+      continue;
+    }
+
+    // Dedupe within request
+    const normKey = normalizeRoast(clamped);
+    if (seen.has(normKey)) continue;
+    seen.add(normKey);
+
+    // Score
+    const score = scoreRoast(clamped, 'medium');
+    candidates.push({ text: clamped, score });
+  }
+
+  // Sort by score descending, pick ONE winner
+  candidates.sort((a, b) => b.score - a.score);
+  const fallbackUsed = candidates.length === 0;
+  const winner = fallbackUsed
+    ? fallbacks[Math.floor(Math.random() * fallbacks.length)]
+    : candidates[0].text;
+  const winnerScore = fallbackUsed ? 0 : candidates[0].score;
+
+  // --- Logging metadata (no logic impact) ---
+  // Classify valid candidates as face-focused vs context-focused
+  const FACE_ANCHORS = ['face', 'smile', 'grin', 'smirk', 'frown', 'squint', 'expression', 'eyes', 'jaw', 'teeth', 'staring'];
+  let faceFocused = 0;
+  let contextFocused = 0;
+  for (const c of candidates) {
+    const s1 = (c.text.match(/[^.!?]*[.!?]+/g) || [c.text])[0].toLowerCase();
+    if (FACE_ANCHORS.some(kw => s1.includes(kw))) faceFocused++;
+    else contextFocused++;
+  }
+
+  // Winner sentence analysis
+  const winnerSents = winner.match(/[^.!?]*[.!?]+/g) || [winner];
+  const winnerS1 = (winnerSents[0] || '').trim().toLowerCase();
+  const winnerS2 = winnerSents.length >= 2 ? winnerSents[1].trim() : '';
+  const wordCount = winner.trim().split(/\s+/).length;
+  const s2WordCount = winnerS2 ? winnerS2.split(/\s+/).length : 0;
+
+  // Detect visual anchor keyword in s1
+  const MEDIUM_EXTRA_VISUAL_LOG = [
+    'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
+    'frame', 'crop', 'angle', 'background', 'garage', 'palm',
+    'kitchen', 'room',
+  ];
+  const allVisualLog = [...VISUAL_KEYWORDS, ...MEDIUM_EXTRA_VISUAL_LOG];
+  const anchor = allVisualLog.find(kw => winnerS1.includes(kw)) || 'none';
+  const visualHit = anchor !== 'none';
+
+  // Classify s2 structure pattern
+  const s2Lower = winnerS2.toLowerCase();
+  const SOCIAL_TOKENS = ['everyone', 'nobody', 'people', 'anyone', 'audience', 'room'];
+  const CRINGE_TOKENS = ['cringe', 'embarrass', 'awkward', 'secondhand', 'uncomfortable'];
+  const CONFIDENCE_TOKENS = ['confidence', 'confident', 'swagger', 'bold', 'bravado'];
+  let structure = 'general';
+  if (MEDIUM_EFFORT_WORDS.some(w => s2Lower.includes(w))) structure = 'effort-mismatch';
+  else if (SOCIAL_TOKENS.some(w => s2Lower.includes(w))) structure = 'social-read';
+  else if (CRINGE_TOKENS.some(w => s2Lower.includes(w))) structure = 'cringe';
+  else if (CONFIDENCE_TOKENS.some(w => s2Lower.includes(w))) structure = 'confidence-gap';
+
+  return {
+    roast: winner,
+    meta: {
+      candidates: numCandidates,
+      valid: candidates.length,
+      rejectCounts,
+      winnerScore,
+      fallbackUsed,
+      anchor,
+      structure,
+      s2words: s2WordCount,
+      wordCount,
+      visualHit,
+      faceFocused,
+      contextFocused,
+    },
+  };
+}
+
 app.post('/api/roast', async (req, res) => {
   try {
     const { imageBase64, level = 'medium', clientId, useSavageV2, sceneHints, safeTags } = req.body;
@@ -3812,6 +4168,21 @@ app.post('/api/roast', async (req, res) => {
       roasts = roasts.slice(0, config.count);
       if (isDev) {
         console.log(`[roast] level=${tierName} (v2) returned=${roasts.length} chars=${roasts[0]?.length || 0}`);
+      }
+      return res.json({ roasts });
+    }
+
+    // --- Medium V2 intercept: single-winner candidate pipeline ---
+    if (tierName === 'medium') {
+      const { roast, meta } = await generateMediumV2({ imageBase64 });
+      roasts = [roast];
+      themes = [];
+      pushRecentMedium(roast);
+      if (isDev) {
+        console.log(`[medium-v2] candidates=${meta.candidates} valid=${meta.valid} rejected=${JSON.stringify(meta.rejectCounts)}`);
+        console.log(`[medium-v2] composition face=${meta.faceFocused} context=${meta.contextFocused}`);
+        console.log(`[medium-v2] winner score=${meta.winnerScore}${meta.fallbackUsed ? ' (fallback)' : ''} text="${roast}"`);
+        console.log(`[medium-v2] anchor=${meta.anchor} structure=${meta.structure} s2words=${meta.s2words} wordCount=${meta.wordCount} visualHit=${meta.visualHit}`);
       }
       return res.json({ roasts });
     }
