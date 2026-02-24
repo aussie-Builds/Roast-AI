@@ -1,22 +1,162 @@
-import { useState } from 'react';
-import { StyleSheet, Pressable, View, ScrollView, ActivityIndicator, Alert } from 'react-native';
+import { useState, useRef, useEffect } from 'react';
+import {
+  StyleSheet,
+  Pressable,
+  View,
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Dimensions,
+  Text,
+} from 'react-native';
 import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import { File } from 'expo-file-system';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import ViewShot from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
 
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
 import { API_BASE_URL } from '@/constants/api';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 
+const TIER_COLORS: Record<RoastLevel, string> = {
+  mild: '#4DA6FF',
+  medium: '#FF9F0A',
+  savage: '#FF3B30',
+  nuclear: '#8B0000',
+};
+
+// Darker button variants — reduce visual competition with verdict
+const TIER_BUTTON_COLORS: Record<RoastLevel, string> = {
+  mild: '#3A8ADB',
+  medium: '#D9870A',
+  savage: '#B8261C',
+  nuclear: '#580000',
+};
+
+// Savage/Nuclear buttons recede so verdict dominates
+const TIER_BUTTON_OPACITY: Record<RoastLevel, number> = {
+  mild: 1,
+  medium: 1,
+  savage: 0.9,
+  nuclear: 0.88,
+};
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+// Height reserved for the controls zone (buttons + padding)
+const CONTROLS_HEIGHT = 200;
+
+// ── Tier-based style escalation ──
+
+const BASE_FONT_SIZE = 28;
+
+const TIER_FONT_SIZE: Record<RoastLevel, number> = {
+  mild: BASE_FONT_SIZE,
+  medium: BASE_FONT_SIZE + 1,
+  savage: BASE_FONT_SIZE + 2,
+  nuclear: BASE_FONT_SIZE + 3,
+};
+
+const TIER_LETTER_SPACING: Record<RoastLevel, number> = {
+  mild: 0,
+  medium: 0,
+  savage: 0,
+  nuclear: 0.3,
+};
+
+const TIER_SHADOW: Record<RoastLevel, { color: string; radius: number }> = {
+  mild: { color: 'rgba(0,0,0,0.8)', radius: 4 },
+  medium: { color: 'rgba(0,0,0,0.8)', radius: 4 },
+  savage: { color: 'rgba(0,0,0,0.8)', radius: 4 },
+  nuclear: { color: 'rgba(0,0,0,0.8)', radius: 4 },
+};
+
+const TIER_GRADIENT: Record<RoastLevel, [string, string, string]> = {
+  mild: ['rgba(0,0,0,0.45)', 'rgba(0,0,0,0.0)', 'rgba(0,0,0,0.78)'],
+  medium: ['rgba(0,0,0,0.55)', 'rgba(0,0,0,0.04)', 'rgba(0,0,0,0.84)'],
+  savage: ['rgba(0,0,0,0.62)', 'rgba(0,0,0,0.12)', 'rgba(0,0,0,0.9)'],
+  nuclear: ['rgba(0,0,0,0.7)', 'rgba(0,0,0,0.25)', 'rgba(0,0,0,0.92)'],
+};
+
+// Nuclear gets a second vignette layer for a noticeably darker center band
+const NUCLEAR_VIGNETTE: [string, string, string] = [
+  'transparent', 'rgba(0,0,0,0.18)', 'transparent',
+];
+
+const TIER_ANIM_DURATION: Record<RoastLevel, number> = {
+  mild: 400,
+  medium: 450,
+  savage: 500,
+  nuclear: 650,
+};
+
+/** Split multi-sentence roasts into an array of sentences. */
+function splitSentences(text: string): string[] {
+  const parts = text.split(/\.\s+/);
+  return parts.map((p, i) => (i < parts.length - 1 && !p.endsWith('.') ? p + '.' : p));
+}
+
 export default function PreviewScreen() {
   const { uri } = useLocalSearchParams<{ uri: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [roasts, setRoasts] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<RoastLevel>('medium');
+  const [shareMode, setShareMode] = useState(false);
+  const animValue = useRef(new Animated.Value(0)).current;
+  const overlayAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const viewShotRef = useRef<ViewShot>(null);
+
+  const hasRoast = roasts.length > 0;
+
+  // Entrance: fade in dark overlay on mount
+  useEffect(() => {
+    Animated.timing(overlayAnim, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  // Roast reveal: delayed fade-in after overlay settles
+  useEffect(() => {
+    if (hasRoast) {
+      animValue.setValue(0);
+      scaleAnim.setValue(level === 'nuclear' ? 1.03 : 1);
+      const delay = setTimeout(() => {
+        const anims: Animated.CompositeAnimation[] = [
+          Animated.timing(animValue, {
+            toValue: 1,
+            duration: TIER_ANIM_DURATION[level],
+            useNativeDriver: true,
+          }),
+        ];
+        if (level === 'nuclear') {
+          anims.push(
+            Animated.timing(scaleAnim, {
+              toValue: 1,
+              duration: 150,
+              useNativeDriver: true,
+            }),
+          );
+        }
+        Animated.parallel(anims).start();
+      }, 500);
+      return () => clearTimeout(delay);
+    }
+  }, [roasts]);
+
+  const roastOpacity = animValue;
+  const roastTranslateY = animValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [10, 0],
+  });
 
   const generateRoast = async () => {
     if (!uri) {
@@ -42,19 +182,13 @@ export default function PreviewScreen() {
     setError(null);
 
     try {
-      // Convert image to base64 using new File API
       const file = new File(uri);
       const base64 = await file.base64();
 
       const response = await fetch(`${API_BASE_URL}/api/roast`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          imageBase64: base64,
-          level,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: base64, level }),
       });
 
       const data = await response.json();
@@ -80,204 +214,365 @@ export default function PreviewScreen() {
     }
   };
 
-  const retake = () => {
-    router.replace('/camera');
+  const retake = () => router.replace('/camera');
+  const goHome = () => router.replace('/');
+
+  const handleShare = async () => {
+    if (!viewShotRef.current?.capture) return;
+    setShareMode(true);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      const uri = await viewShotRef.current.capture();
+      await Sharing.shareAsync(uri);
+    } catch (err) {
+      console.log(err);
+    } finally {
+      setShareMode(false);
+    }
   };
 
-  const goHome = () => {
-    router.replace('/');
+  const controlsBottom = insets.bottom + 16;
+
+  // Tier-based text style
+  const shadow = TIER_SHADOW[level];
+  const roastTextStyle = {
+    fontSize: TIER_FONT_SIZE[level],
+    lineHeight: TIER_FONT_SIZE[level] + (level === 'savage' || level === 'nuclear' ? 6 : 10),
+    letterSpacing: TIER_LETTER_SPACING[level],
+    textShadowColor: shadow.color,
+    textShadowRadius: shadow.radius,
+    textShadowOffset: { width: 0, height: 2 },
+  };
+
+  // Render roast sentences as separate blocks for 2-sentence roasts
+  const renderRoastText = () => {
+    const sentences = splitSentences(roasts[0]);
+    if (sentences.length >= 2) {
+      return (
+        <>
+          <Text
+            style={[styles.roastText, roastTextStyle]}
+            adjustsFontSizeToFit
+            minimumFontScale={0.75}
+          >
+            {sentences[0]}
+          </Text>
+          <View style={{ height: level === 'nuclear' ? 8 : level === 'savage' ? 4 : 8 }} />
+          <Text
+            style={[styles.roastText, roastTextStyle]}
+            adjustsFontSizeToFit
+            minimumFontScale={0.75}
+          >
+            {sentences.slice(1).join(' ')}
+          </Text>
+        </>
+      );
+    }
+    return (
+      <Text
+        style={[styles.roastText, roastTextStyle]}
+        numberOfLines={3}
+        adjustsFontSizeToFit
+        minimumFontScale={0.75}
+      >
+        {roasts[0]}
+      </Text>
+    );
   };
 
   return (
-    <ThemedView style={styles.container}>
-      <View style={styles.imageContainer}>
-        <Image source={{ uri }} style={styles.image} contentFit="cover" />
-      </View>
+    <View style={styles.container}>
+      {/* ── Capture area: everything the share screenshot includes ── */}
+      <ViewShot ref={viewShotRef} options={{ format: 'png', quality: 1 }} style={styles.captureArea}>
+        {/* Full-screen background image */}
+        <Image source={{ uri }} style={styles.backgroundImage} contentFit="cover" />
 
-      {/* Level Selector - only show before generating */}
-      {roasts.length === 0 && !isLoading && (
-        <View style={styles.levelContainer}>
-          <ThemedText style={styles.levelLabel}>Roast Level:</ThemedText>
+        {/* Gradient overlay — tier-escalated, fades in on entrance */}
+        <Animated.View style={[styles.gradient, { opacity: overlayAnim }]}>
+          <LinearGradient
+            colors={TIER_GRADIENT[level]}
+            locations={[0, 0.35, 1]}
+            style={StyleSheet.absoluteFillObject}
+          />
+          {/* Nuclear extra vignette — darker center band */}
+          {level === 'nuclear' && (
+            <LinearGradient
+              colors={NUCLEAR_VIGNETTE}
+              locations={[0.2, 0.5, 0.8]}
+              style={StyleSheet.absoluteFillObject}
+            />
+          )}
+        </Animated.View>
+
+        {/* Tier badge — top left */}
+        <View style={[styles.tierBadge, { top: insets.top + 12, backgroundColor: TIER_COLORS[level] }]}>
+          <Text style={styles.tierBadgeText}>{level.toUpperCase()}</Text>
+        </View>
+
+        {/* ── Verdict zone: roast text / loading / error ── */}
+        <View style={[styles.verdictContainer, { bottom: CONTROLS_HEIGHT + controlsBottom }]}>
+          {isLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#fff" />
+              <Text style={styles.loadingText}>Analyzing...</Text>
+            </View>
+          ) : error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable style={styles.retryButton} onPress={generateRoast}>
+                <Text style={styles.retryButtonText}>Try Again</Text>
+              </Pressable>
+            </View>
+          ) : hasRoast ? (
+            <Animated.View
+              style={[
+                styles.roastTextContainer,
+                level === 'savage' && styles.roastTextContainerSavage,
+                level === 'nuclear' && styles.roastTextContainerNuclear,
+                { opacity: roastOpacity, transform: [{ translateY: roastTranslateY }, { scale: scaleAnim }] },
+              ]}
+            >
+              {renderRoastText()}
+            </Animated.View>
+          ) : (
+            <Text style={styles.placeholderText}>
+              Select your roast level{'\n'}and tap Generate
+            </Text>
+          )}
+        </View>
+
+        {/* Watermark — only visible during share capture */}
+        {shareMode && (
+          <View style={styles.watermark}>
+            <Text style={styles.watermarkLine1}>CONFIDENCE TEST</Text>
+            <Text style={[styles.watermarkLine2, { color: TIER_COLORS[level] + 'CC' }]}>
+              {level.toUpperCase()}
+            </Text>
+          </View>
+        )}
+      </ViewShot>
+
+      {/* Level selector — outside capture ref */}
+      {!hasRoast && !isLoading && !error && (
+        <View style={[styles.levelSelector, { top: insets.top + 60 }]}>
           <View style={styles.levelButtons}>
             {(['mild', 'medium', 'savage', 'nuclear'] as RoastLevel[]).map((l) => (
               <Pressable
                 key={l}
-                style={[styles.levelButton, level === l && styles.levelButtonActive]}
+                style={[
+                  styles.levelButton,
+                  level === l && { backgroundColor: TIER_COLORS[l], borderColor: TIER_COLORS[l] },
+                ]}
                 onPress={() => setLevel(l)}
               >
-                <ThemedText
-                  style={[styles.levelButtonText, level === l && styles.levelButtonTextActive]}
-                >
+                <Text style={[styles.levelButtonText, level === l && styles.levelButtonTextActive]}>
                   {l.charAt(0).toUpperCase() + l.slice(1)}
-                </ThemedText>
+                </Text>
               </Pressable>
             ))}
           </View>
         </View>
       )}
 
-      {/* Content Area */}
-      <ScrollView style={styles.roastContainer} contentContainerStyle={styles.roastContent}>
-        {isLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#FF6B6B" />
-            <ThemedText style={styles.loadingText}>Analyzing your face...</ThemedText>
-            <ThemedText style={styles.loadingSubtext}>Preparing roasts...</ThemedText>
-          </View>
-        ) : error ? (
-          <View style={styles.errorContainer}>
-            <ThemedText style={styles.errorText}>{error}</ThemedText>
-            <Pressable style={styles.retryButton} onPress={generateRoast}>
-              <ThemedText style={styles.retryButtonText}>Try Again</ThemedText>
-            </Pressable>
-          </View>
-        ) : roasts.length > 0 ? (
-          roasts.map((roast, index) => (
-            <View key={index} style={styles.roastItem}>
-              <ThemedText style={styles.roastNumber}>{index + 1}</ThemedText>
-              <ThemedText style={styles.roastText}>{roast}</ThemedText>
-            </View>
-          ))
-        ) : (
-          <ThemedText style={styles.placeholderText}>
-            Select your roast level and tap Generate!
-          </ThemedText>
-        )}
-      </ScrollView>
-
-      {/* Buttons */}
-      <View style={styles.buttonContainer}>
-        {roasts.length === 0 && !error ? (
+      {/* ── Controls zone: buttons anchored at bottom — outside capture ref ── */}
+      <View style={[styles.controlsContainer, { bottom: controlsBottom }]}>
+        {!hasRoast && !error ? (
           <Pressable
             style={({ pressed }) => [
-              styles.roastButton,
+              styles.generateButton,
+              { backgroundColor: TIER_BUTTON_COLORS[level] },
               pressed && !isLoading && styles.buttonPressed,
               isLoading && styles.buttonDisabled,
             ]}
             onPress={generateRoast}
             disabled={isLoading}
           >
-            <ThemedText style={styles.roastButtonText}>
+            <Text style={styles.generateButtonText}>
               {isLoading ? 'Generating...' : 'Generate Roast'}
-            </ThemedText>
+            </Text>
           </Pressable>
-        ) : roasts.length > 0 ? (
+        ) : hasRoast ? (
           <>
             <Pressable
               style={({ pressed }) => [
-                styles.roastButton,
+                styles.generateButton,
+                { backgroundColor: TIER_BUTTON_COLORS[level], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
                 pressed && !isLoading && styles.buttonPressed,
-                isLoading && styles.buttonDisabled,
               ]}
               onPress={generateRoast}
               disabled={isLoading}
             >
-              <ThemedText style={styles.roastButtonText}>
+              <Text style={styles.generateButtonText}>
                 {isLoading ? 'Generating...' : 'Roast Again'}
-              </ThemedText>
+              </Text>
             </Pressable>
             <Pressable
               style={({ pressed }) => [
                 styles.secondaryButton,
+                { opacity: TIER_BUTTON_OPACITY[level] },
                 pressed && styles.buttonPressed,
               ]}
               onPress={retake}
               disabled={isLoading}
             >
-              <ThemedText style={styles.secondaryButtonText}>Retake Photo</ThemedText>
+              <Text style={styles.secondaryButtonText}>Retake Photo</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.shareButton,
+                pressed && styles.buttonPressed,
+              ]}
+              onPress={handleShare}
+            >
+              <Text style={styles.shareButtonText}>Share Roast</Text>
             </Pressable>
           </>
         ) : null}
         <Pressable style={styles.linkButton} onPress={goHome} disabled={isLoading}>
-          <ThemedText style={[styles.linkButtonText, isLoading && styles.textDisabled]}>
+          <Text style={[styles.linkButtonText, isLoading && styles.textDisabled]}>
             Back to Home
-          </ThemedText>
+          </Text>
         </Pressable>
       </View>
-    </ThemedView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 24,
+    backgroundColor: '#000',
   },
-  imageContainer: {
+
+  // Capture area for share screenshot
+  captureArea: {
+    ...StyleSheet.absoluteFillObject,
+  },
+
+  // Full-screen image
+  backgroundImage: {
+    ...StyleSheet.absoluteFillObject,
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT,
+  },
+
+  // Gradient overlay
+  gradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+
+  // Tier badge
+  tierBadge: {
+    position: 'absolute',
+    left: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    zIndex: 10,
+  },
+  tierBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+
+  // Level selector
+  levelSelector: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
     alignItems: 'center',
-    marginBottom: 16,
-  },
-  image: {
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    borderWidth: 3,
-    borderColor: '#FF6B6B',
-  },
-  levelContainer: {
-    marginBottom: 16,
-  },
-  levelLabel: {
-    fontSize: 14,
-    opacity: 0.7,
-    marginBottom: 8,
-    textAlign: 'center',
+    zIndex: 10,
   },
   levelButtons: {
     flexDirection: 'row',
-    justifyContent: 'center',
     gap: 8,
   },
   levelButton: {
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#666',
-  },
-  levelButtonActive: {
-    backgroundColor: '#FF6B6B',
-    borderColor: '#FF6B6B',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.4)',
   },
   levelButtonText: {
-    fontSize: 14,
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
+    fontWeight: '600',
   },
   levelButtonTextActive: {
     color: '#fff',
-    fontWeight: '600',
   },
-  roastContainer: {
-    flex: 1,
+
+  // ── Verdict zone ──
+  verdictContainer: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    top: '30%',
+    justifyContent: 'flex-end',
+    zIndex: 10,
   },
-  roastContent: {
-    paddingVertical: 8,
-    flexGrow: 1,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
+
+  // Roast text
+  roastTextContainer: {
     alignItems: 'center',
-    paddingVertical: 40,
+    maxWidth: 360,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+  },
+  roastTextContainerSavage: {
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+  },
+  roastTextContainerNuclear: {
+    backgroundColor: 'rgba(35,0,0,0.14)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(120,0,0,0.35)',
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+  },
+  roastText: {
+    color: '#fff',
+    fontSize: BASE_FONT_SIZE,
+    fontWeight: '700',
+    textAlign: 'center',
+    lineHeight: BASE_FONT_SIZE + 10,
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 4,
+  },
+
+  // Loading
+  loadingContainer: {
+    alignItems: 'center',
   },
   loadingText: {
+    color: '#fff',
     fontSize: 18,
-    marginTop: 16,
     fontWeight: '600',
+    marginTop: 12,
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
   },
-  loadingSubtext: {
-    fontSize: 14,
-    marginTop: 4,
-    opacity: 0.6,
-  },
+
+  // Error
   errorContainer: {
     alignItems: 'center',
-    paddingVertical: 24,
   },
   errorText: {
+    color: '#FF6B6B',
     fontSize: 16,
     textAlign: 'center',
-    color: '#FF6B6B',
     marginBottom: 16,
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
   },
   retryButton: {
     paddingHorizontal: 24,
@@ -291,53 +586,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  roastItem: {
-    flexDirection: 'row',
-    marginBottom: 16,
-    paddingHorizontal: 8,
-  },
-  roastNumber: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#FF6B6B',
-    marginRight: 12,
-    width: 30,
-  },
-  roastText: {
-    flex: 1,
-    fontSize: 16,
-    lineHeight: 24,
-  },
+
+  // Placeholder
   placeholderText: {
-    fontSize: 16,
-    textAlign: 'center',
-    opacity: 0.6,
-    marginTop: 32,
-  },
-  buttonContainer: {
-    gap: 12,
-    paddingTop: 16,
-  },
-  roastButton: {
-    backgroundColor: '#FF6B6B',
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  roastButtonText: {
-    color: '#fff',
+    color: 'rgba(255,255,255,0.6)',
     fontSize: 18,
+    textAlign: 'center',
+    lineHeight: 26,
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+
+  // ── Controls zone ──
+  controlsContainer: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    gap: 10,
+    zIndex: 10,
+  },
+  generateButton: {
+    paddingVertical: 13,
+    borderRadius: 14,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  generateButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '600',
   },
   secondaryButton: {
-    backgroundColor: '#444',
-    paddingVertical: 16,
-    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingVertical: 11,
+    borderRadius: 14,
     alignItems: 'center',
   },
   secondaryButtonText: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '500',
   },
   buttonPressed: {
@@ -350,11 +642,46 @@ const styles = StyleSheet.create({
     opacity: 0.4,
   },
   linkButton: {
-    paddingVertical: 12,
+    paddingVertical: 8,
     alignItems: 'center',
   },
   linkButtonText: {
-    fontSize: 14,
-    opacity: 0.7,
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 13,
+  },
+
+  // Share button
+  shareButton: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    paddingVertical: 11,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  shareButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+
+  // Watermark (visible only during share capture)
+  watermark: {
+    position: 'absolute',
+    bottom: 24,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  watermarkLine1: {
+    fontSize: 12,
+    letterSpacing: 2,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
+  },
+  watermarkLine2: {
+    fontSize: 11,
+    letterSpacing: 3,
+    fontWeight: '600',
+    marginTop: 2,
   },
 });
