@@ -13,11 +13,14 @@ const KEYS = {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
 
+const DEV_UNLOCK = true; // DEV TEST ONLY – remove before production
+
 export async function canRoast(
   level: RoastLevel,
 ): Promise<{ allowed: boolean; reason?: string }> {
   const premium = await AsyncStorage.getItem(KEYS.premium);
-  if (premium === 'true') return { allowed: true };
+  const isPremiumEffective = DEV_UNLOCK || premium === 'true';
+  if (isPremiumEffective) return { allowed: true };
 
   if (level === 'nuclear') {
     return { allowed: false, reason: 'Nuclear mode is premium only' };
