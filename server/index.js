@@ -2445,6 +2445,7 @@ function getClientState(clientId) {
   if (!st.recentNuclearTexts) st.recentNuclearTexts = [];
   if (!st.recentAudiencePhrases) st.recentAudiencePhrases = [];
   if (!st.lastSentenceStarter) st.lastSentenceStarter = null;
+  if (!st.nv2RecentWinners) st.nv2RecentWinners = [];
   return st;
 }
 
@@ -2861,10 +2862,26 @@ async function extractSafeSelfieTags(imageInput) {
     const outerwearVisNorm = normTag(parsed.outerwear_visible);
     const outerwear_visible = outerwearVisNorm && ALLOWED_YES_NO.has(outerwearVisNorm) ? outerwearVisNorm : 'no';
 
-    // Deterministic expression fallback: if face is clearly visible but expression is unknown, default to deadpan
-    const faceClear = (face_visible === 'yes' && face_obstructed === 'no' && face_confidence !== 'low');
-    if (faceClear && (!expression || expression === 'unknown')) {
-      expression = 'deadpan';
+    // Expression synonym enrichment: vary the expression token for anti-repetition
+    {
+      const EXPR_NEUTRAL = ['deadpan', 'blank stare', 'straight face', 'neutral stare', 'unbothered look'];
+      const EXPR_SMILE = ['smile', 'polite smile', 'forced smile', 'half-smile'];
+      const EXPR_AWKWARD_GRIN = ['awkward grin', 'uneasy grin', 'strained grin', 'trying-too-hard grin'];
+      const EXPR_BIG_SMILE = ['wide grin', 'toothpaste-ad grin', 'overcommitted smile', 'full-send grin'];
+      const _pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
+      const originalExpression = expression;
+      if ((!expression || expression === 'unknown') && face_visible === 'yes') {
+        expression = _pickRandom(EXPR_NEUTRAL);
+      } else if (expression === 'awkward grin') {
+        expression = _pickRandom(EXPR_AWKWARD_GRIN);
+      } else if (/smile/i.test(expression) && !/big|wide/i.test(expression)) {
+        expression = _pickRandom(EXPR_SMILE);
+      } else if (/big smile|wide grin/i.test(expression)) {
+        expression = _pickRandom(EXPR_BIG_SMILE);
+      } else if (expression === 'deadpan' || expression === 'blank') {
+        expression = _pickRandom(EXPR_NEUTRAL);
+      }
+      if (expression !== originalExpression && isDev) console.log('[nuclear-v2] expression enriched', { originalExpression, newExpression: expression });
     }
 
     // Debug: log rejected/unknown tags when DEBUG_TAGS=1
@@ -2877,7 +2894,11 @@ async function extractSafeSelfieTags(imageInput) {
       console.log(`[selfie-tags] face_visible=${face_visible} face_obstructed=${face_obstructed} face_visibility=${face_visibility} face_confidence=${face_confidence} person_present=${person_present} hair_visible=${hair_visible} outfit_visible=${outfit_visible} outerwear_visible=${outerwear_visible}`);
     }
 
-    return { objects, angle, lighting, framing, setting, pose, hair, outfit, expression, grooming, bg_vibe, face_visible, face_obstructed, face_visibility, face_confidence, hair_confidence, person_present, hair_visible, outfit_visible, outerwear_visible };
+    // Deterministic fallback: if hair is visible but tag is missing/unknown, use generic token
+    const finalHair = (hair_visible === 'yes' && (!hair || hair === 'unknown')) ? 'hair' : hair;
+    if (finalHair !== hair && isDev) console.log('[selfie-tags] hair fallback: visible but unknown, using generic "hair"');
+
+    return { objects, angle, lighting, framing, setting, pose, hair: finalHair, outfit, expression, grooming, bg_vibe, face_visible, face_obstructed, face_visibility, face_confidence, hair_confidence, person_present, hair_visible, outfit_visible, outerwear_visible };
   } catch (err) {
     if (isDev) console.log(`[nuclear-v2] selfie-tags error: ${err.message}`);
     return emptyResult;
@@ -3298,7 +3319,7 @@ async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
 }
 
 // --- Nuclear V2 freeform candidate validation ---
-function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, isDev }) {
+function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, isDev, sceneFiltered = [], selfieAttrs = [], tagObjects = [], lightingTag = '' }) {
   let score = 100;
   // A. Exactly 2 sentences
   const sents = text.match(/[^.!?]*[.!?]+/g);
@@ -3324,6 +3345,23 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   const lower = text.toLowerCase();
   const matchedDetails = detailAnchors.filter(d => lower.includes(d.toLowerCase()));
   if (matchedDetails.length < 2) return { valid: false, score: 0, reason: 'missingDetails' };
+  // F2. Modifier-only penalty: discourage roasts that anchor only on lighting/angle/framing
+  const MODIFIER_ANCHOR_REGEX = /\b(angle|lighting|framing|setting|pose|bg_vibe|centered|straight-on|low angle|high angle|mixed)\b/i;
+  const matchedNonModifier = matchedDetails.filter(d => !MODIFIER_ANCHOR_REGEX.test(d));
+  if (matchedDetails.length >= 2 && matchedNonModifier.length === 0) {
+    score -= 22;
+    if (isDev) console.log(`[nuclear-v2] modifierOnly penalty matched=${matchedDetails.join(',')}`);
+  }
+  // F3. Scene dominance penalty: discourage over-reliance on scene objects when identity anchors exist
+  const _scenePool = new Set([...sceneFiltered, ...tagObjects].map(s => s.toLowerCase().trim()).filter(Boolean));
+  const _identityExclude = /\b(angle|tilted|off-center|framing|crop|cropped|lighting|dim|dark|glare|backlit|shadow|centered|straight-on|setting|garage|outdoors)\b/i;
+  const _identityPool = new Set([...selfieAttrs].map(s => s.toLowerCase().trim()).filter(a => a && a.length >= 3 && !_identityExclude.test(a)));
+  const sceneMatches = matchedDetails.filter(d => _scenePool.has(d.toLowerCase()));
+  const identityMatches = matchedDetails.filter(d => _identityPool.has(d.toLowerCase()));
+  if (sceneMatches.length >= 2 && identityMatches.length <= 1) {
+    score -= 20;
+    if (isDev) console.log('[nuclear-v2] sceneDominance penalty', { sceneMatches, identityMatches });
+  }
   // G. Scene anchor: ≥1 if sceneAnchors is non-empty
   if (sceneAnchors.length > 0) {
     const hasScene = sceneAnchors.some(s => lower.includes(s.toLowerCase()));
@@ -3350,6 +3388,18 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   // M. Sentence-1 anchor gate: s1 must reference at least one photo-specific detail (or scene anchor)
   const s1AnchorPool = [...detailAnchors, ...(sceneAnchors || [])];
   if (!nv2HasAnyAnchorToken(sents[0], s1AnchorPool)) return { valid: false, score: 0, reason: 'noS1Anchor' };
+  // M2. Camera-only S1 penalty: if sentence 1 only references camera/lighting anchors, penalize
+  const CAMERA_ANCHOR_REGEX = /\b(angle|tilted|off-center|framing|frame|crop|cropped|lighting|dim|dark|glare|backlit|shadow|shadows|screen|centered|straight-on|selfie|camera|lens)\b/i;
+  const nonCameraAnchors = [...new Set([
+    ...sceneFiltered.map(s => s.toLowerCase().trim()),
+    ...selfieAttrs.map(s => s.toLowerCase().trim()),
+    ...tagObjects.map(s => s.toLowerCase().trim()),
+  ])].filter(a => a && a.length >= 3 && !CAMERA_ANCHOR_REGEX.test(a));
+  const s1HasNonCamera = nv2HasAnyAnchorToken(sents[0], nonCameraAnchors);
+  if (nonCameraAnchors.length >= 3 && !s1HasNonCamera) {
+    score -= 25;
+    if (isDev) console.log(`[nuclear-v2] cameraOnlyS1 penalty nonCamera=${nonCameraAnchors.length} s1="${sents[0].trim()}" text="${text}"`);
+  }
   // N. Micdrop validator: sentence 2 must be a cold, declarative punchline
   const s2Raw = sents[1].trim();
   const s2WordCount = s2Raw.split(/\s+/).length;
@@ -3362,6 +3412,91 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (/\?/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop question wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
   if (/!/.test(s2Raw) && s2WordCount > 4) { score -= 4; if (isDev) console.log(`[nuclear-v2] exclamation penalty s2="${s2Raw}"`); }
   if (!/[.!]$/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop no-terminal wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
+  // N2. Object-as-judge S2 penalty: discourage "The X...", "Even the X...", "Not even the X..." openers
+  if (/^(even\s+the|not\s+even\s+the|the\s+)/i.test(s2Raw)) {
+    score -= 22;
+    if (isDev) console.log('[nuclear-v2] s2ObjectStart penalty', s2Raw);
+  }
+  // N3. Identity anchor bonus: prefer roasts that target the person (expression/outfit/hair) over environment
+  const IDENTITY_ANCHOR_REGEX = /\b(angle|tilted|off-center|framing|crop|cropped|lighting|dim|dark|glare|backlit|shadow|centered|straight-on|setting|garage|outdoors)\b/i;
+  const identityAnchors = [...new Set(
+    selfieAttrs.map(s => s.toLowerCase().trim()),
+  )].filter(a => a && a.length >= 3 && !IDENTITY_ANCHOR_REGEX.test(a));
+  if (identityAnchors.length > 0) {
+    const s1HasIdentity = identityAnchors.some(a => sents[0].toLowerCase().includes(a.toLowerCase()));
+    if (s1HasIdentity) {
+      score += 18;
+      if (isDev) console.log('[nuclear-v2] identityAnchor bonus', identityAnchors);
+    } else {
+      score -= 40;
+      if (isDev) console.log('[nuclear-v2] s1 missing identity penalty', identityAnchors);
+    }
+  }
+  // N4. Identity-lead bonus: reward candidates that open with identity anchors in first 6 words (skip if env-led)
+  const ENV_LEAD_REGEX = /^\s*(you|your)\s+(dim|dark|bright|harsh|backlit|garage|lighting|angle|tilted|selfie|outdoors|window|shadow|screen|framing|cropped)\b/i;
+  if (identityAnchors.length > 0 && !ENV_LEAD_REGEX.test(sents[0])) {
+    const firstWordsStr = sents[0].toLowerCase().split(/\s+/).slice(0, 6).join(' ');
+    if (identityAnchors.some(a => firstWordsStr.includes(a.toLowerCase()))) {
+      score += 12;
+      if (isDev) console.log('[nuclear-v2] identityLead bonus', { firstWords: firstWordsStr });
+    }
+  }
+  // N5. Env-led S1 penalty: discourage opening with environment/camera when identity anchors exist
+  if (identityAnchors.length > 0) {
+    const ENV_S1_REGEX = /^(your\s+)?(dim|dimly\s+lit|mixed\s+lighting|lighting|garage|office|outdoors|window|angle|framing|selfie)\b/i;
+    if (ENV_S1_REGEX.test(sents[0].trim())) {
+      score -= 25;
+      if (isDev) console.log('[nuclear-v2] envLeadS1 penalty', sents[0].trim());
+    }
+  }
+  // N6. Lighting mention fatigue: penalize lighting repetition across recent winners (unless extreme)
+  {
+    const LIGHTING_MENTION_RE = /\b(lighting|dim|bright|overexposed|glaring|backlit|shadows?)\b/i;
+    const recentWinners = clientState.nv2RecentWinners || [];
+    const recentMentionsLighting = recentWinners.some(t => LIGHTING_MENTION_RE.test(t));
+    const mentionsLightingNow = LIGHTING_MENTION_RE.test(text);
+    const lightingVal = String(lightingTag).toLowerCase();
+    const isExtremeLighting = ['very dim', 'dark', 'shadowy', 'glaring', 'harsh', 'overexposed', 'blown out', 'backlit'].includes(lightingVal);
+    const fatigueActive = recentMentionsLighting && !isExtremeLighting;
+    if (fatigueActive && mentionsLightingNow) {
+      score -= 35;
+      if (isDev) console.log('[nuclear-v2] lightingFatigue penalty', { lightingVal, text });
+    }
+    // Anti-lighting bonus: reward candidates that avoid lighting when fatigue is active
+    if (fatigueActive && !mentionsLightingNow) {
+      score += 20;
+      if (isDev) console.log('[nuclear-v2] antiLighting bonus', { text });
+    }
+    // Extra penalty for lighting-led S1 under fatigue
+    if (fatigueActive && NUCLEAR_LIGHTING_OPENERS.some(lo => sents[0].trim().toLowerCase().startsWith(lo))) {
+      score -= 12;
+      if (isDev) console.log('[nuclear-v2] fatigueLightingOpener extra penalty', { s1: sents[0].trim(), text });
+    }
+    // Extra penalty for any lighting mention under fatigue (stacks with main fatigue penalty)
+    if (fatigueActive && mentionsLightingNow) {
+      score -= 8;
+      if (isDev) console.log('[nuclear-v2] fatigueLightingMention extra penalty', { text });
+    }
+  }
+  // N7. "Your dim garage selfie" lead penalty
+  const NUCLEAR_SELFIE_ENV_LEAD_RE = /^your\s+(?:\w+\s+){0,2}(dim|dimly lit|dark|low[- ]light)\s+(?:\w+\s+){0,2}(garage|room|setup|space)\s+selfie\b/i;
+  if (NUCLEAR_SELFIE_ENV_LEAD_RE.test(text)) {
+    score -= 18;
+    if (isDev) console.log('[nuclear-v2] selfieEnvLead penalty', { text });
+  }
+  // N8. "screams" crutch penalty in S1
+  if (/\bscreams\b/i.test(sents[0])) {
+    score -= 10;
+    if (isDev) console.log('[nuclear-v2] screamsCrutch penalty', { s1: sents[0].trim(), text });
+  }
+  // N9. Identity-start bonus: reward S1 that opens directly with an identity anchor
+  if (identityAnchors.length > 0) {
+    const s1First3 = sents[0].trim().toLowerCase().replace(/^(your|that|this)\s+/i, '').split(/\s+/).slice(0, 2).join(' ');
+    if (identityAnchors.some(a => s1First3.includes(a.toLowerCase()))) {
+      score += 10;
+      if (isDev) console.log('[nuclear-v2] identityStart bonus', { firstWords: s1First3, text });
+    }
+  }
 
   // Scoring
   score += Math.min(30, (matchedDetails.length - 2) * 10); // bonus for extra detail anchors
@@ -3380,6 +3515,20 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   const NV2_CORNY_MICDROP_TOKENS = ['tool time', 'era', 'arc', 'main character', 'of despair', 'energy', 'vibes', 'rizz', 'sigma', 'npc', 'final boss'];
   const cornyMatch = NV2_CORNY_MICDROP_TOKENS.find(t => s2Lower.includes(t));
   if (cornyMatch) { score -= 12; if (isDev) console.log(`[nuclear-v2] cornyMicdrop: "${cornyMatch}" in s2="${s2}"`); }
+  // "more alive than you" repetition penalty
+  if (/more\s+alive\s+than\s+you/i.test(text)) { score -= 18; if (isDev) console.log('[nuclear-v2] phrase penalty: more alive than you'); }
+  if (/more\s+lively\s+than\s+you/i.test(text)) { score -= 18; if (isDev) console.log('[nuclear-v2] phrase penalty: more lively than you'); }
+  if (/look\s+like\s+it\s+has\s+more\s+personality/i.test(text)) { score -= 18; if (isDev) console.log('[nuclear-v2] phrase penalty: look like it has more personality'); }
+  if (/has\s+more\s+drive/i.test(text)) { score -= 10; if (isDev) console.log('[nuclear-v2] phrase penalty: has more drive'); }
+  // Comparison trope penalty: "more X than you/your selfie" structures
+  const NUCLEAR_COMPARISON_TROPE_RE = /\b(more|less)\b[^.]{0,50}\b(than)\b[^.]{0,40}\b(you|your selfie|your face|your look|your expression)\b/i;
+  if (NUCLEAR_COMPARISON_TROPE_RE.test(text)) { score -= 16; if (isDev) console.log('[nuclear-v2] comparisonTrope penalty', { text }); }
+  // Glowing/only-thing-alive cliché penalty
+  const NUCLEAR_GLOWING_ONLY_RE = /\b(only|just)\b[^.]{0,25}\b(one|thing)\b[^.]{0,25}\b(glowing|alive|lively|awake|working)\b/i;
+  if (NUCLEAR_GLOWING_ONLY_RE.test(text)) { score -= 14; if (isDev) console.log('[nuclear-v2] glowingOnly penalty', { text }); }
+  // "makes X look more alive/lively" cliché penalty
+  const NUCLEAR_MORE_ALIVE_RE = /\b(makes|making)\b[^.]{0,40}\b(look|seem)\b[^.]{0,20}\b(more)\b[^.]{0,20}\b(alive|lively|awake)\b/i;
+  if (NUCLEAR_MORE_ALIVE_RE.test(text)) { score -= 12; if (isDev) console.log('[nuclear-v2] moreAlive penalty', { text }); }
   // Generic micdrop penalty: penalize abstract filler punchlines
   const NV2_GENERIC_MICDROP_TOKENS = ['confidence', 'charisma', 'motivation', 'vibes', 'energy', 'aura', 'personality', 'presence', 'effort', 'try-hard', 'desperation', 'midlife crisis', 'hopes dashed', 'cringe'];
   const s2GenericMatch = NV2_GENERIC_MICDROP_TOKENS.find(t => s2Lower.includes(t));
@@ -3425,6 +3574,48 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
       if (nv2CadenceStart(prev) === candStart) { score -= 15; break; }
     }
   }
+  // Social exposure bonus: reward ego-hit / socially fatal phrasing
+  const NUCLEAR_SOCIAL_EXPOSURE_RE = /\b(hit post|pressed post|posted this|uploaded this|really posted|thought this was|this was the one|nobody asked|confidence like this|should've stayed|should have stayed|should've stayed in drafts|should've stayed private|try again|delete this|this isn't it|wasn't it|no recovery|in public|in private|group chat|story|feed|timeline|drafts|start over|bold of you)\b/i;
+  if (NUCLEAR_SOCIAL_EXPOSURE_RE.test(text)) {
+    score += 26;
+    if (isDev) console.log('[nuclear-v2] socialExposure bonus', { text });
+  }
+  // Trope penalty: reduce generic internet roast clichés
+  const NUCLEAR_TROPE_RE = /\b(basement|future hacker|tech support|hacker at best|keyboard warrior|discord mod|neckbeard)\b/i;
+  if (NUCLEAR_TROPE_RE.test(text)) {
+    score -= 18;
+    if (isDev) console.log('[nuclear-v2] trope penalty', { text });
+  }
+  // Cute object commentary penalty: reduce "object judging you" humor
+  const NUCLEAR_CUTE_OBJECT_RE = /\b(car|monitor|shelves|garage|chair|wall|door)\b.*\b(judging|disapproves|embarrassed|ashamed|plotting|begging)\b/i;
+  if (NUCLEAR_CUTE_OBJECT_RE.test(text)) {
+    score -= 12;
+    if (isDev) console.log('[nuclear-v2] cuteObject penalty', { text });
+  }
+  // Object-led penalty: reduce "object screams/tells/says" patterns
+  const NUCLEAR_OBJECT_LEAD_RE = /\b(monitor|keyboard|car|shelves|setup)\b.*\b(scream|screams|saying|tells|disapproves|judging|begging|plotting)\b/i;
+  if (NUCLEAR_OBJECT_LEAD_RE.test(text)) {
+    score -= 14;
+    if (isDev) console.log('[nuclear-v2] objectLead penalty', { text });
+  }
+  // Personal jab bonus: reward confidence/effort targeting (store-safe)
+  const NUCLEAR_PERSONAL_JAB_RE = /\b(self-esteem|confidence|delusion|validation|attention|main character|audacity)\b/i;
+  if (NUCLEAR_PERSONAL_JAB_RE.test(text)) {
+    score += 14;
+    if (isDev) console.log('[nuclear-v2] personalJab bonus', { text });
+  }
+  // Finality mic-drop bonus: reward short decisive endings
+  const NUCLEAR_FINALITY_RE = /\b(try again|delete (it|this)|start over|no recovery|wasn't it|should've stayed private)\.?$/i;
+  if (NUCLEAR_FINALITY_RE.test(s2.trim())) {
+    score += 15;
+    if (isDev) console.log('[nuclear-v2] finality bonus', { text });
+  }
+  // Hedge penalty: reduce weak/uncertain phrasing
+  const NUCLEAR_HEDGE_RE = /\b(at best|maybe|kind of|sort of)\b/i;
+  if (NUCLEAR_HEDGE_RE.test(text)) {
+    score -= 8;
+    if (isDev) console.log('[nuclear-v2] hedge penalty', { text });
+  }
   return { valid: true, score, reason: null };
 }
 
@@ -3457,11 +3648,14 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   const detailParts = [];
   if (isKnownTag(tags.lighting)) detailParts.push(`lighting: ${tags.lighting}`);
   if (isKnownTag(tags.setting)) detailParts.push(`setting: ${tags.setting}`);
-  if (isKnownTag(tags.outfit) && tags.outfit_visible === 'yes') detailParts.push(`outfit: ${tags.outfit}`);
-  if (isKnownTag(tags.expression) && isUsableFace) detailParts.push(`expression: ${tags.expression}`);
-  if (isKnownTag(tags.hair) && isUsableFace) detailParts.push(`hair: ${tags.hair}`);
+  const faceVisible = tags.face_visible === 'yes' || tags.face_visible === true;
+  const hairVisible = tags.hair_visible === 'yes' || tags.hair_visible === true;
+  const outfitVisible = tags.outfit_visible === 'yes' || tags.outfit_visible === true;
+  if (isKnownTag(tags.outfit) && outfitVisible) detailParts.push(`outfit: ${tags.outfit}`);
+  if (isKnownTag(tags.expression) && faceVisible) detailParts.push(`expression: ${tags.expression}`);
+  if (isKnownTag(tags.hair) && hairVisible) detailParts.push(`hair: ${tags.hair}`);
   if (isKnownTag(tags.pose) && isUsableFace) detailParts.push(`pose: ${tags.pose}`);
-  if (isKnownTag(tags.grooming) && isUsableFace) detailParts.push(`grooming: ${tags.grooming}`);
+  if (isKnownTag(tags.grooming) && faceVisible) detailParts.push(`grooming: ${tags.grooming}`);
   if (isKnownTag(tags.bg_vibe)) detailParts.push(`vibe: ${tags.bg_vibe}`);
   if (isKnownTag(tags.angle)) detailParts.push(`angle: ${tags.angle}`);
   if (isKnownTag(tags.framing)) detailParts.push(`framing: ${tags.framing}`);
@@ -3497,6 +3691,22 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     if (isDev && finalDetailAnchors.length < 3) console.log(`[nuclear-v2] detailPackWeak=true anchors=${finalDetailAnchors.length}`);
   }
 
+  // Identity anchor injection: ensure face/expression/hair/outfit are roastable when visible
+  {
+    let _injected = false;
+    if (tags.face_visible === 'yes') {
+      if (!finalDetailAnchors.includes('face')) { finalDetailAnchors.push('face'); _injected = true; }
+      if (!finalDetailAnchors.includes('expression')) { finalDetailAnchors.push('expression'); _injected = true; }
+    }
+    if (tags.hair_visible === 'yes') {
+      if (!finalDetailAnchors.includes('hair')) { finalDetailAnchors.push('hair'); _injected = true; }
+    }
+    if (tags.outfit_visible === 'yes') {
+      if (!finalDetailAnchors.includes('outfit')) { finalDetailAnchors.push('outfit'); _injected = true; }
+    }
+    if (_injected && isDev) console.log('[nuclear-v2] injected identity anchors', { face_visible: tags.face_visible, hair_visible: tags.hair_visible, outfit_visible: tags.outfit_visible });
+  }
+
   // Scene anchors: dynamic from tagger output, with generic-term stoplist
   const NV2_GENERIC_SCENE_STOP = new Set(['wall', 'floor', 'ceiling', 'room', 'door', 'window', 'background', 'surface', 'space', 'area', 'corner', 'side', 'thing', 'stuff', 'item', 'object', 'place']);
   const rawScenePool = [
@@ -3506,6 +3716,10 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   ];
   const sceneAnchors = [...new Set(rawScenePool)].filter(s => s.length >= 3 && !NV2_GENERIC_SCENE_STOP.has(s));
 
+  // Pre-compute selfieAttrs and tagObjects for cameraOnlyS1 penalty
+  const selfieAttrs = [tags.hair, tags.outfit, tags.expression, tags.grooming, tags.bg_vibe].map(cleanTagToken).filter(Boolean);
+  const tagObjects = tags.objects.slice(0, 6).map(s => s.toLowerCase().trim()).filter(s => s.length >= 3);
+
   // Generate candidates in parallel (more when face is unusable)
   const genN = isUsableFace ? 8 : 12;
   const rawCandidates = await nv2GenerateCandidates({ imageBase64, detailsBlock, n: genN });
@@ -3513,7 +3727,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   // Validate + score
   const results = rawCandidates.map(raw => {
     const cleaned = nv2SanitizeQuotes(nv2CleanOutput(raw));
-    const result = nv2ValidateCandidate(cleaned, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev });
+    const result = nv2ValidateCandidate(cleaned, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev, sceneFiltered: filteredSceneTargets, selfieAttrs, tagObjects, lightingTag: tags.lighting || '' });
     return { text: cleaned, ...result };
   });
   const valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
@@ -3547,7 +3761,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
           temperature: 0.5,
         });
         const fixed = nv2SanitizeQuotes(nv2CleanOutput(rewriteResp.output_text || ''));
-        const fixResult = nv2ValidateCandidate(fixed, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev });
+        const fixResult = nv2ValidateCandidate(fixed, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev, sceneFiltered: filteredSceneTargets, selfieAttrs, tagObjects, lightingTag: tags.lighting || '' });
         if (fixResult.valid) {
           finalRoast = fixed;
           if (isDev) console.log(`[nuclear-v2] rewriteFallback=success text="${fixed}"`);
@@ -3706,6 +3920,9 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   // Track per-client nuclear texts for phrase fatigue
   state.recentNuclearTexts.push(finalRoast);
   if (state.recentNuclearTexts.length > 12) state.recentNuclearTexts.shift();
+  // Track recent winners for lighting fatigue
+  state.nv2RecentWinners.push(finalRoast);
+  if (state.nv2RecentWinners.length > 3) state.nv2RecentWinners.shift();
 
   // Track target category and final text for graphic-tee rotation
   lastNuclearTargetCategory = 'other';
@@ -3727,7 +3944,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
       clientId,
       wordCount,
       targetSource: 'freeform',
-      selfieAttrs: [tags.hair, tags.outfit, tags.expression, tags.grooming, tags.bg_vibe].map(cleanTagToken).filter(Boolean),
+      selfieAttrs,
       tagModifiers: [tags.angle, tags.lighting, tags.framing, tags.pose, tags.setting].map(cleanTagToken).filter(Boolean),
       sceneTargetCount: dynamicTargets.length,
       sceneTargetsAfterFilter,
