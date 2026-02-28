@@ -8,7 +8,9 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "tune:nuclear": "node tools/tune_nuclear.js",
+    "tune:savage": "node tools/tune_nuclear.js --tier savage"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -16,6 +18,7 @@
     "@react-navigation/bottom-tabs": "^7.4.0",
     "@react-navigation/elements": "^2.6.3",
     "@react-navigation/native": "^7.1.8",
+    "dotenv": "^17.3.1",
     "expo": "~54.0.33",
     "expo-camera": "~17.0.10",
     "expo-constants": "~18.0.13",

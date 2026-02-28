@@ -1,9 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -1364,6 +1368,23 @@ const NUCLEAR_COMMON_OPENERS = [
 // Lighting-first opener phrases (subset of above, extra penalty)
 const NUCLEAR_LIGHTING_OPENERS = ['this lighting', 'dim lighting', 'the lighting', 'in this lighting'];
 
+// Escalation patterns: social-consequence phrasing scored as bonus in Nuclear
+const NUCLEAR_ESCALATION_PATTERNS = [
+  /\b(posted|uploaded|shared)\b/i,
+  /\bgroup chat\b/i,
+  /\bstory\b/i,
+  /\bprofile pic\b/i,
+  /\bresume\b/i,
+  /\bjob interview\b/i,
+  /\bHR\b/i,
+  /\bfamily group\b/i,
+  /\bLinkedIn\b/i,
+  /\bpublic\b/i,
+  /\bpermanent\b/i,
+  /\bnever recover\b/i,
+  /\bcareer\b/i,
+];
+
 function scoreRoast(text, tierName, lane = null, { requiredExposure = null, clientState = null } = {}) {
   let score = 50;
   const lower = text.toLowerCase();
@@ -2363,6 +2384,7 @@ function isPlaySafe(text) {
 
 // --- Per-client repetition memory ---
 const nuclearClientState = new Map();
+const savageStructureHistory = new Map();
 const NV2_MAX_RECENT_ROASTS = 20;
 const NV2_MAX_RECENT_TARGETS = 6;
 const NV2_MAX_RECENT_STRUCTURES = 6;
@@ -2676,6 +2698,12 @@ function nv2FilterSceneNouns(rawNouns) {
     .slice(0, 12);
 }
 
+function nv2ToDataUrl(imageBase64, fallbackMime = 'image/jpeg') {
+  if (!imageBase64) return `data:${fallbackMime};base64,`;
+  if (typeof imageBase64 === 'string' && imageBase64.startsWith('data:image/')) return imageBase64;
+  return `data:${fallbackMime};base64,${imageBase64}`;
+}
+
 async function nv2ExtractSceneNouns(imageBase64) {
   const isDev = process.env.NODE_ENV !== 'production';
   try {
@@ -2685,7 +2713,7 @@ async function nv2ExtractSceneNouns(imageBase64) {
         { role: 'system', content: 'You list concrete objects/background elements in photos. Output ONLY a JSON array of 6–12 short nouns (1–2 words each). No people/body attributes. Example: ["monitor","keyboard","LED strip","posters","desk"]' },
         { role: 'user', content: [
           { type: 'input_text', text: 'List 6–12 concrete objects or background elements visible in this photo as short nouns (1–2 words each). No people or body attributes. JSON array only.' },
-          { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+          { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
         ]},
       ],
       max_output_tokens: 120,
@@ -2791,7 +2819,7 @@ async function extractSafeSelfieTags(imageInput) {
         { role: 'system', content: 'You analyze photos for safe visual qualities only. Output ONLY valid JSON. Never mention identity, race, gender, age, body size, attractiveness, or protected traits. Never mention nudity or sexual content.' },
         { role: 'user', content: [
           { type: 'input_text', text: 'Look at the image. Output ONLY valid JSON matching this schema: {"objects":[],"angle":"unknown","lighting":"unknown","framing":"unknown","setting":null,"pose":"unknown","hair":"unknown","outfit":"unknown","expression":"unknown","grooming":"unknown","bg_vibe":"unknown","face_visible":"no","face_obstructed":"no","face_visibility":"not_visible","face_confidence":"low","hair_confidence":"low","person_present":"no","hair_visible":"no","outfit_visible":"no","outerwear_visible":"no"}. Deterministic face mapping: - If face_visible="yes" AND face_obstructed="no", then face_visibility MUST be "clear". - If face_visible="no", then face_visibility MUST be "not_visible". - If face_visible="yes" AND face_obstructed="yes", then face_visibility MUST be "partial" or "obscured" (choose based on severity). Visibility definitions: - face_visible="yes" if a face is present at all. - face_obstructed="yes" only if the face is cropped, blurred, heavily shadowed, or mostly covered. Confidence rule: - If face_visible="yes" AND face_obstructed="no", face_confidence MUST be at least "medium". objects: 0-12 nouns (monitor, keyboard, desk, tools, etc.). angle: one of "low angle","high angle","straight-on","tilted","off-center","unknown". lighting: one of "dim","harsh","backlit","screen glow","bright","mixed","unknown". framing: one of "close crop","too far","awkward crop","centered","unknown". setting: short label like "garage","bedroom","office","outdoors","plain wall" or null. pose: one of "stiff","forced casual","over-serious","trying-to-look-cool","deadpan","unknown". hair: one of "messy","greasy","flat","overgrown","slicked","helmet hair","bed head","windswept","frizzy","unkempt","freshly cut","dyed","parted","buzzed","unknown". outfit: one of "wrinkled","oversized","too tight","mismatched","graphic tee","athleisure","pajamas","formal","layered","plain","branded","vintage","basic","gym clothes","uniform","unknown". expression: one of "blank","smug","confused","bored","forced smile","duck face","squinting","surprised","zoned out","intense","unbothered","cringe","awkward grin","side-eye","pouty","frown","unknown". grooming: one of "unshaved","over-groomed","low-effort","freshly trimmed","scraggly","clean-shaven","five-o-clock shadow","peach fuzz","handlebar","soul patch","unknown". bg_vibe: one of "cluttered","sterile","chaotic","bare","staged","dingy","flex-heavy","trying too hard","lived-in","fluorescent","grim","corporate","basement","unknown". face_visible: one of "yes","no". face_obstructed: one of "yes","no". face_visibility: one of "clear","partial","obscured","not_visible". face_confidence: one of "low","medium","high". hair_confidence: one of "low","medium","high". person_present: one of "yes","no". hair_visible: one of "yes","no". outfit_visible: one of "yes","no". outerwear_visible: one of "yes","no". Outerwear rule: - outerwear_visible="yes" ONLY if a jacket, hoodie, coat, or outer layer is clearly present. - outerwear_visible="no" otherwise. Visibility rules: - If any person is visible, set person_present="yes". - If hair is visible, set hair_visible="yes" and hair_confidence to at least "medium". Hair may still be "unknown" if the style cannot be classified. - If clothing/outfit is visible, set outfit_visible="yes". Outfit label may remain "unknown" if unclear. Expression rule: - If the facial expression is clearly visible (e.g. smiling, grinning, frowning, scowling), choose the closest matching enum label instead of "unknown". - Broad smiles with teeth visible should map to "awkward grin" unless clearly subtle and relaxed. - Obvious frowns or scowls should map to "frown". - Use "unknown" only when the expression cannot be reasonably inferred. Keep hair/grooming/outfit as "unknown" unless clearly visible enough to classify confidently. If unsure, return "unknown" (not null) for enum fields. Only describe visible objects and SAFE photo/style qualities. Do NOT mention identity, race, gender, age, body size, attractiveness, or protected traits. Do NOT mention nudity/sexual content. Output ONLY valid JSON, no markdown fences.' },
-          { type: 'input_image', image_url: `data:image/jpeg;base64,${imageInput}` },
+          { type: 'input_image', image_url: nv2ToDataUrl(imageInput) },
         ]},
       ],
       max_output_tokens: 350,
@@ -3308,7 +3336,7 @@ async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
         { role: 'system', content: systemMsg },
         { role: 'user', content: [
           { type: 'input_text', text: userMsg },
-          { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+          { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
         ]},
       ],
       max_output_tokens: 60,
@@ -3579,6 +3607,24 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (NUCLEAR_SOCIAL_EXPOSURE_RE.test(text)) {
     score += 26;
     if (isDev) console.log('[nuclear-v2] socialExposure bonus', { text });
+  }
+  // N-esc. Escalation bonus: reward social-consequence phrasing in identity-led roasts
+  {
+    const s1LightingLed = NUCLEAR_LIGHTING_OPENERS.some(lo => sents[0].trim().toLowerCase().startsWith(lo));
+    const sceneDominant = sceneMatches.length >= 2 && identityMatches.length <= 1;
+    const recentWinners = clientState.nv2RecentWinners || [];
+    const lightingFatigueActive = recentWinners.some(t => /\b(lighting|dim|bright|overexposed|glaring|backlit|shadows?)\b/i.test(t))
+      && !['very dim', 'dark', 'shadowy', 'glaring', 'harsh', 'overexposed', 'blown out', 'backlit'].includes(String(lightingTag).toLowerCase());
+    if (identityMatches.length >= 1 && !s1LightingLed && !sceneDominant && !lightingFatigueActive) {
+      const escalationMatches = NUCLEAR_ESCALATION_PATTERNS.filter(re => re.test(text)).length;
+      if (escalationMatches >= 2) {
+        score += 15;
+        if (isDev) console.log('[nuclear-v2] escalation bonus +15', { escalationMatches, text });
+      } else if (escalationMatches >= 1) {
+        score += 10;
+        if (isDev) console.log('[nuclear-v2] escalation bonus +10', { escalationMatches, text });
+      }
+    }
   }
   // Trope penalty: reduce generic internet roast clichés
   const NUCLEAR_TROPE_RE = /\b(basement|future hacker|tech support|hacker at best|keyboard warrior|discord mod|neckbeard)\b/i;
@@ -3934,6 +3980,21 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     console.log(`[nuclear-v2] result="${finalRoast}" wordCount=${wordCount}`);
   }
 
+  if (process.env.TUNING_MODE) {
+    return {
+      roast: finalRoast,
+      meta: {
+        tier: 'nuclear',
+        isUsableFace: typeof isUsableFace !== 'undefined' ? isUsableFace : null,
+        detailPackWeak: typeof finalDetailAnchors !== 'undefined' ? finalDetailAnchors.length < 3 : null,
+        anchorsCount: typeof selfieAttrs !== 'undefined' ? selfieAttrs.length : null,
+        candidatesCount: typeof rawCandidates !== 'undefined' ? rawCandidates.length : null,
+        validCount: typeof valid !== 'undefined' ? valid.length : null,
+        rejectedReasons: typeof rejected !== 'undefined' ? rejected.map(r => r.reason) : null,
+        winnerScore: typeof valid !== 'undefined' && valid.length > 0 ? valid[0].score : null,
+      },
+    };
+  }
   return {
     roast: finalRoast,
     meta: {
@@ -4109,33 +4170,35 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
 
     if (isDev) console.log(`[savage-v2] attempt=${attempts} skeleton="${skeleton}"`);
 
-    // 3. GPT polish (rewrite-only)
-    const polishPrompt = `Rewrite this EXACT roast to sound more natural and punchy. Do NOT add new ideas, do NOT change the target, do NOT add new sentences. Keep 1–2 sentences. 12–26 words preferred. Do NOT use questions. Output ONLY the rewritten roast, nothing else.\n\nRoast: "${skeleton}"`;
-
+    // 3. GPT polish (rewrite-only) — skipped in TUNING_MODE to preserve skeleton
     let polished = skeleton;
-    try {
-      const polishOpts = {
-        model: 'gpt-4o',
-        input: [
-          { role: 'system', content: 'You are a roast rewriter. You ONLY output the rewritten roast. No quotes, no explanation, no markdown. 1–2 sentences only. Savage but not cruel.' },
-          {
-            role: 'user',
-            content: [
-              { type: 'input_text', text: polishPrompt },
-              { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
-            ],
-          },
-        ],
-        max_output_tokens: 100,
-        temperature: 0.85,
-        top_p: 0.9,
-      };
-      const polishResp = await openai.responses.create(polishOpts);
-      if (polishResp.output_text) {
-        polished = polishResp.output_text;
+    if (!process.env.TUNING_MODE) {
+      const polishPrompt = `Rewrite this EXACT roast to sound more natural and punchy. Do NOT add new ideas, do NOT change the target, do NOT add new sentences. Keep 1–2 sentences. 12–26 words preferred. Do NOT use questions. Output ONLY the rewritten roast, nothing else.\n\nRoast: "${skeleton}"`;
+
+      try {
+        const polishOpts = {
+          model: 'gpt-4o',
+          input: [
+            { role: 'system', content: 'You are a roast rewriter. You ONLY output the rewritten roast. No quotes, no explanation, no markdown. 1–2 sentences only. Savage but not cruel.' },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: polishPrompt },
+                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+              ],
+            },
+          ],
+          max_output_tokens: 100,
+          temperature: 0.85,
+          top_p: 0.9,
+        };
+        const polishResp = await openai.responses.create(polishOpts);
+        if (polishResp.output_text) {
+          polished = polishResp.output_text;
+        }
+      } catch (err) {
+        if (isDev) console.log(`[savage-v2] polish LLM error: ${err.message}`);
       }
-    } catch (err) {
-      if (isDev) console.log(`[savage-v2] polish LLM error: ${err.message}`);
     }
 
     // 4. Clean
@@ -4157,6 +4220,24 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
       wordCount = result.split(/\s+/).length;
     }
 
+    // Word count scoring: soft preference for 10–14 words
+    let wcScore = 0;
+    if (wordCount >= 10 && wordCount <= 14) wcScore += 12;
+    if (wordCount < 8) wcScore -= 10;
+    if (wordCount > 16) wcScore -= 6;
+
+    // Structure fatigue: penalize reuse of recent structureIds
+    const structHistory = savageStructureHistory.get(clientId) || [];
+    if (structHistory.includes(structure.id)) {
+      wcScore -= 12;
+      if (isDev) console.log(`[savage-v2] structureFatigue penalty structureId=${structure.id}`);
+    }
+
+    if (wcScore < 0 && attempts < maxAttempts) {
+      if (isDev) console.log(`[savage-v2] low score=${wcScore} wc=${wordCount}, retrying`);
+      continue;
+    }
+
     finalRoast = result;
     break;
   }
@@ -4173,11 +4254,30 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
 
   pushSavageClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id);
 
+  // Update structure fatigue history (keep last 3)
+  const prevHistory = savageStructureHistory.get(clientId) || [];
+  savageStructureHistory.set(clientId, [pickedStructure.id, ...prevHistory].slice(0, 3));
+
   if (isDev) {
     console.log(`[savage-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" attempts=${attempts} fallback=${fallbackUsed} words=${wordCount}`);
     console.log(`[savage-v2] result="${finalRoast}"`);
   }
 
+  if (process.env.TUNING_MODE) {
+    return {
+      roast: finalRoast,
+      meta: {
+        tier: 'savage',
+        isUsableFace: null,
+        detailPackWeak: null,
+        anchorsCount: null,
+        candidatesCount: typeof attempts !== 'undefined' ? attempts : null,
+        validCount: null,
+        rejectedReasons: null,
+        winnerScore: null,
+      },
+    };
+  }
   return {
     roast: finalRoast,
     meta: {
@@ -4216,7 +4316,7 @@ async function generateMediumV2({ imageBase64 }) {
 
   const imageContent = [
     { type: 'input_text', text: userPrompt },
-    { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+    { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
   ];
 
   const buildCallOpts = () => {
@@ -4359,6 +4459,21 @@ async function generateMediumV2({ imageBase64 }) {
   else if (CRINGE_TOKENS.some(w => s2Lower.includes(w))) structure = 'cringe';
   else if (CONFIDENCE_TOKENS.some(w => s2Lower.includes(w))) structure = 'confidence-gap';
 
+  if (process.env.TUNING_MODE) {
+    return {
+      roast: winner,
+      meta: {
+        tier: 'medium',
+        isUsableFace: null,
+        detailPackWeak: null,
+        anchorsCount: null,
+        candidatesCount: typeof numCandidates !== 'undefined' ? numCandidates : null,
+        validCount: typeof candidates !== 'undefined' ? candidates.length : null,
+        rejectedReasons: typeof rejectCounts !== 'undefined' ? Object.keys(rejectCounts) : null,
+        winnerScore: typeof winnerScore !== 'undefined' ? winnerScore : null,
+      },
+    };
+  }
   return {
     roast: winner,
     meta: {
@@ -4403,7 +4518,7 @@ async function generateMildV2({ imageBase64 }) {
 
   const imageContent = [
     { type: 'input_text', text: userPrompt },
-    { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+    { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
   ];
 
   const buildCallOpts = () => {
@@ -4507,6 +4622,21 @@ async function generateMildV2({ imageBase64 }) {
     : candidates[0].text;
   const winnerScore = fallbackUsed ? 0 : candidates[0].score;
 
+  if (process.env.TUNING_MODE) {
+    return {
+      roast: winner,
+      meta: {
+        tier: 'mild',
+        isUsableFace: null,
+        detailPackWeak: null,
+        anchorsCount: null,
+        candidatesCount: typeof numCandidates !== 'undefined' ? numCandidates : null,
+        validCount: typeof candidates !== 'undefined' ? candidates.length : null,
+        rejectedReasons: typeof rejectCounts !== 'undefined' ? Object.keys(rejectCounts) : null,
+        winnerScore: typeof winnerScore !== 'undefined' ? winnerScore : null,
+      },
+    };
+  }
   return {
     roast: winner,
     meta: {
@@ -4609,7 +4739,7 @@ app.post('/api/roast', async (req, res) => {
 
     const imageContent = [
       { type: 'input_text', text: prompt },
-      { type: 'input_image', image_url: `data:image/jpeg;base64,${imageBase64}` },
+      { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
     ];
 
     // --- Build call options (with model params per tier) ---
@@ -5275,6 +5405,10 @@ app.use((err, req, res, _next) => {
   res.status(err.status || 500).json({ error: 'server_error', message: err.message });
 });
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Roast server running at http://0.0.0.0:${port}`);
-});
+if (!process.env.TUNING_MODE) {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Roast server running at http://0.0.0.0:${port}`);
+  });
+}
+
+export { generateNuclearV2, generateSavageV2, nv2ExtractSceneNouns, extractSafeSelfieTags };
