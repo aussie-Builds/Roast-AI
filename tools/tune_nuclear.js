@@ -82,6 +82,58 @@ function rate(arr, predicate) {
   return arr.filter(predicate).length / arr.length;
 }
 
+function savageOpenerFamily(text) {
+  const lower = text.toLowerCase().trimStart();
+  if (lower.startsWith('nobody needed to see')) return 'FAMILY_NOBODY';
+  if (lower.startsWith('even your') || lower.startsWith('even the')) return 'FAMILY_EVEN';
+  if (lower.startsWith('your ')) return 'FAMILY_YOUR';
+  if (lower.startsWith('that ')) return 'FAMILY_THAT';
+  if (lower.startsWith('the ')) return 'FAMILY_THE';
+  return 'FAMILY_MISC';
+}
+
+function savageQualityScore(text) {
+  const wc = countWords(text);
+  let score = 0;
+  if (wc >= 11 && wc <= 12) score += 18;
+  else if (wc === 10 || (wc >= 13 && wc <= 14)) score += 12;
+  else if (wc === 9) score += 6;
+  else if (wc <= 8) score -= 10;
+  if (wc > 16) score -= 6;
+  if (savageOpenerFamily(text) === 'FAMILY_NOBODY') score -= 6;
+  return score;
+}
+
+function nuclearQualityScore(text) {
+  const wc = countWords(text);
+  let score = 0;
+  if (wc >= 14 && wc <= 22) score += 12;
+  else if (wc >= 10 && wc <= 13) score += 6;
+  else if (wc >= 23 && wc <= 26) score += 4;
+  else if (wc <= 9) score -= 10;
+  if (wc > 30) score -= 8;
+  if (isCliche(text)) score -= 6;
+  if (SOCIAL_EXPOSURE_RE.test(text)) score += 4;
+  if (lightingLeadsS1(text)) score -= 4;
+  return score;
+}
+
+const SV2_STALE_RE = /\b(went through the motions|missed the memo|needs a second draft)\b/i;
+
+function savageSpiceScore(text) {
+  const lower = text.toLowerCase();
+  const wc = countWords(text);
+  let score = 0;
+  if (lower.includes('buffering')) score += 6;
+  if (lower.includes('in public')) score += 5;
+  if (lower.includes('delete this')) score += 5;
+  if (lower.includes('mid with confidence') || lower.includes('confidence without')) score += 4;
+  if (text.includes('\u2014')) score += 3;
+  if (wc >= 8 && wc <= 13 && /[.!?]$/.test(text.trim())) score += 2;
+  if (SV2_STALE_RE.test(text)) score -= 6;
+  return score;
+}
+
 function dupRate(texts) {
   let dupPairs = 0;
   let totalPairs = 0;
@@ -191,6 +243,7 @@ async function main() {
       const entry = {
         text: roast,
         words: countWords(roast),
+        meta: meta,
       };
       if (tier === 'nuclear') {
         entry.lightingMentioned = LIGHTING_MENTION_RE.test(roast);
@@ -228,6 +281,14 @@ async function main() {
     console.log(`socialExposureRate: ${rate(allEntries, e => e.socialExposure).toFixed(2)}`);
     console.log(`clicheRate: ${rate(allEntries, e => e.cliche).toFixed(2)}`);
   }
+  if (tier === 'savage') {
+    const MICRO_TEXT_RE = /mid with confidence|confidence without clearance|delete this|in public\?|in public\./i;
+    const microCount = allEntries.filter(e =>
+      (e.meta && (e.meta.structureId === 'MICRO' || e.meta.pickedStructureId === 'MICRO')) ||
+      MICRO_TEXT_RE.test(e.text)
+    ).length;
+    console.log(`microHitRate: ${(microCount / total).toFixed(2)}`);
+  }
   console.log(`duplicateRate: ${dupRate(allTexts).toFixed(2)}`);
   console.log(`avgWords: ${(allEntries.reduce((s, e) => s + e.words, 0) / total).toFixed(1)}`);
 
@@ -244,11 +305,63 @@ async function main() {
       console.log(`  socialExposureRate: ${rate(results, r => r.socialExposure).toFixed(2)}`);
       console.log(`  clicheRate: ${rate(results, r => r.cliche).toFixed(2)}`);
     }
+    if (tier === 'nuclear') {
+      const scored = results.map(r => ({
+        text: r.text,
+        words: r.words,
+        score: nuclearQualityScore(r.text),
+        family: savageOpenerFamily(r.text),
+      })).sort((a, b) => b.score - a.score);
+
+      const best = scored[0];
+      console.log(`  best: "${best.text}" (score=${best.score} words=${best.words})`);
+
+      const NV2_FALLBACK_RE = /^(that angle was a creative|bold strategy going with|you posed like this was|your confidence walked in|that effort was voluntary)/i;
+      const ascending = [...scored].reverse();
+      const worst = ascending.find(r => r.text && !NV2_FALLBACK_RE.test(r.text)) || ascending[0];
+      console.log(`  worst: "${worst.text}" (score=${worst.score} words=${worst.words})`);
+
+      const famCounts = { YOUR: 0, THAT: 0, THE: 0, NOBODY: 0, EVEN: 0, MISC: 0 };
+      for (const r of scored) {
+        const key = r.family.replace('FAMILY_', '');
+        famCounts[key] = (famCounts[key] || 0) + 1;
+      }
+      const famStr = Object.entries(famCounts).map(([k, v]) => `${k}=${v}`).join(' ');
+      console.log(`  families: ${famStr}`);
+    }
     console.log(`  duplicateRate: ${dupRate(texts).toFixed(2)}`);
     console.log(`  avgWords: ${(results.reduce((s, r) => s + r.words, 0) / results.length).toFixed(1)}`);
     if (tier === 'savage') {
-      const bestRoast = results.reduce((best, r) => r.words > best.words ? r : best, results[0]);
-      console.log(`  bestRoast: "${bestRoast.text}"`);
+      const scored = results.map(r => ({
+        text: r.text,
+        words: r.words,
+        score: savageQualityScore(r.text),
+        spice: savageSpiceScore(r.text),
+        family: savageOpenerFamily(r.text),
+      })).sort((a, b) => b.score - a.score);
+
+      const best = scored[0];
+      console.log(`  best: "${best.text}" (score=${best.score} family=${best.family} words=${best.words})`);
+
+      // Worst (lowest score, excluding fallbacks)
+      const FALLBACK_RE = /^(that angle was a creative|bold strategy going with|you posed like this was|your confidence walked in|that effort was voluntary)/i;
+      const ascending = [...scored].reverse();
+      const worst = ascending.find(r => r.text && !FALLBACK_RE.test(r.text)) || ascending[0];
+      console.log(`  worst: "${worst.text}" (score=${worst.score} family=${worst.family} words=${worst.words})`);
+
+      // Spiciest
+      const bySpice = [...scored].sort((a, b) => b.spice !== a.spice ? b.spice - a.spice : b.score - a.score);
+      const spiciest = bySpice[0];
+      console.log(`  spiciest: "${spiciest.text}" (spice=${spiciest.spice} family=${spiciest.family} words=${spiciest.words})`);
+
+      // Family distribution
+      const famCounts = { YOUR: 0, THAT: 0, THE: 0, NOBODY: 0, EVEN: 0, MISC: 0 };
+      for (const r of scored) {
+        const key = r.family.replace('FAMILY_', '');
+        famCounts[key] = (famCounts[key] || 0) + 1;
+      }
+      const famStr = Object.entries(famCounts).map(([k, v]) => `${k}=${v}`).join(' ');
+      console.log(`  families: ${famStr}`);
     }
   }
 }
