@@ -2385,6 +2385,20 @@ function isPlaySafe(text) {
 // --- Per-client repetition memory ---
 const nuclearClientState = new Map();
 const savageStructureHistory = new Map();
+const savageFamilyHistory = new Map();
+
+function getSavageFamilyHistory(clientId) {
+  return savageFamilyHistory.get(clientId || 'anon') || [];
+}
+
+function pushSavageFamilyHistory(clientId, familyId) {
+  const key = clientId || 'anon';
+  const arr = savageFamilyHistory.get(key) || [];
+  arr.push(familyId);
+  while (arr.length > 3) arr.shift();
+  savageFamilyHistory.set(key, arr);
+}
+
 const NV2_MAX_RECENT_ROASTS = 20;
 const NV2_MAX_RECENT_TARGETS = 6;
 const NV2_MAX_RECENT_STRUCTURES = 6;
@@ -3326,7 +3340,7 @@ function nv2ContradictsFacts(text, facts) {
 
 // --- Nuclear V2 freeform candidate generation ---
 async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
-  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Sentence 1 MUST start with "You" or "Your".\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.`;
+  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Avoid starting sentence 1 with "Your". Prefer non-"Your" openers ~70% of the time. Good starters: "Somebody lied to you about…", "Nobody warned you that…", "You really posted this like…", "This is the kind of photo that…", "The room clocked…", "Be honest…"\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Do NOT use the trope "Even the <object/person> looks embarrassed/judging/disagrees" or endings like "X disagrees", "X deserves better".\n- Mention lighting ONLY if extremely bright or dim, never in the first 6 words, and only once.\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.`;
   const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Sentence 1: reference ≥2 visible details. Sentence 2: 3–7 word cold punchline ending in "." only (no "!"). Be specific, original, punchy.`;
 
   const calls = Array.from({ length: n }, () =>
@@ -3352,8 +3366,13 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   // A. Exactly 2 sentences
   const sents = text.match(/[^.!?]*[.!?]+/g);
   if (!sents || sents.length !== 2) return { valid: false, score: 0, reason: 'sentenceCount' };
-  // A2. Sentence 1 must start with "You" or "Your" (direct/accusational framing)
-  if (!/^\s*(you|your)\b/i.test(sents[0])) return { valid: false, score: 0, reason: 'noDirectS1' };
+  // A2. Sentence 1 must use direct/accusational framing
+  const s1Trimmed = sents[0].trim();
+  const s1DirectOpener = /^\s*(you|your|this|nobody|somebody|be honest|that|the)\b/i.test(s1Trimmed);
+  const s1First10 = s1Trimmed.split(/\s+/).slice(0, 10).join(' ').toLowerCase();
+  const s1HasYou = /\b(you|your)\b/i.test(s1First10);
+  const s1HasIdentity = /\b(smile|grin|stare|face|expression|eyes|hair|shirt|outfit|hoodie|jacket|glasses|beard|eyebrows|posture|stance|hat|collar|watch|pose)\b/i.test(s1First10);
+  if (!s1DirectOpener || (!s1HasYou && !s1HasIdentity)) return { valid: false, score: 0, reason: 'noDirectS1' };
   // B. 12-26 words
   const wc = text.split(/\s+/).length;
   if (wc < 12 || wc > 26) return { valid: false, score: 0, reason: 'wordCount' };
@@ -3399,15 +3418,20 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (NV2_FREEFORM_STEM_BANS.some(s => lower.includes(s))) return { valid: false, score: 0, reason: 'templateStem' };
   // I. Global repeat
   if (isRecentNuclearRepeat(text)) return { valid: false, score: 0, reason: 'globalRepeat' };
-  // J. Phrase fatigue (per-client)
+  // J. Phrase fatigue (per-client) — soft penalty, not a hard reject
+  let phraseFatigueHits = 0;
   if (clientState.recentNuclearTexts) {
     const nv2FatigueStart = (t) => { const w = t.toLowerCase().split(/\s+/); if (w[0] === 'you' || w[0] === 'your') w.shift(); return w.slice(0, 4).join(' '); };
     const candStart = nv2FatigueStart(text);
     for (const prev of clientState.recentNuclearTexts.slice(-10)) {
       const prevStart = nv2FatigueStart(prev);
-      if (candStart === prevStart) return { valid: false, score: 0, reason: 'phraseFatigue' };
-      if (tokenOverlap(text, prev) >= 0.55) return { valid: false, score: 0, reason: 'phraseFatigue' };
+      if (candStart === prevStart || tokenOverlap(text, prev) >= 0.55) { phraseFatigueHits++; break; }
     }
+  }
+  if (phraseFatigueHits > 0) {
+    const penalty = Math.min(phraseFatigueHits * 14, 28);
+    score -= penalty;
+    if (isDev) console.log(`[nuclear-v2] phraseFatigue penalty -${penalty} hits=${phraseFatigueHits} text="${text.slice(0, 60)}"`);
   }
   // K. Soft opener
   if (s1IsSoft(text)) return { valid: false, score: 0, reason: 'softOpener' };
@@ -3442,7 +3466,7 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (!/[.!]$/.test(s2Raw)) { if (isDev) console.log(`[nuclear-v2] weakMicdrop no-terminal wc=${s2WordCount} s2="${s2Raw}"`); return { valid: false, score: 0, reason: 'weakMicdrop' }; }
   // N2. Object-as-judge S2 penalty: discourage "The X...", "Even the X...", "Not even the X..." openers
   if (/^(even\s+the|not\s+even\s+the|the\s+)/i.test(s2Raw)) {
-    score -= 22;
+    score -= 8;
     if (isDev) console.log('[nuclear-v2] s2ObjectStart penalty', s2Raw);
   }
   // N3. Identity anchor bonus: prefer roasts that target the person (expression/outfit/hair) over environment
@@ -3456,7 +3480,7 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
       score += 18;
       if (isDev) console.log('[nuclear-v2] identityAnchor bonus', identityAnchors);
     } else {
-      score -= 40;
+      score -= 15;
       if (isDev) console.log('[nuclear-v2] s1 missing identity penalty', identityAnchors);
     }
   }
@@ -3473,7 +3497,7 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (identityAnchors.length > 0) {
     const ENV_S1_REGEX = /^(your\s+)?(dim|dimly\s+lit|mixed\s+lighting|lighting|garage|office|outdoors|window|angle|framing|selfie)\b/i;
     if (ENV_S1_REGEX.test(sents[0].trim())) {
-      score -= 25;
+      score -= 10;
       if (isDev) console.log('[nuclear-v2] envLeadS1 penalty', sents[0].trim());
     }
   }
@@ -3494,16 +3518,6 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
     if (fatigueActive && !mentionsLightingNow) {
       score += 20;
       if (isDev) console.log('[nuclear-v2] antiLighting bonus', { text });
-    }
-    // Extra penalty for lighting-led S1 under fatigue
-    if (fatigueActive && NUCLEAR_LIGHTING_OPENERS.some(lo => sents[0].trim().toLowerCase().startsWith(lo))) {
-      score -= 12;
-      if (isDev) console.log('[nuclear-v2] fatigueLightingOpener extra penalty', { s1: sents[0].trim(), text });
-    }
-    // Extra penalty for any lighting mention under fatigue (stacks with main fatigue penalty)
-    if (fatigueActive && mentionsLightingNow) {
-      score -= 8;
-      if (isDev) console.log('[nuclear-v2] fatigueLightingMention extra penalty', { text });
     }
   }
   // N7. "Your dim garage selfie" lead penalty
@@ -3661,6 +3675,20 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
   if (NUCLEAR_HEDGE_RE.test(text)) {
     score -= 8;
     if (isDev) console.log('[nuclear-v2] hedge penalty', { text });
+  }
+  // "Your" opener penalty: encourage diverse openers
+  if (/^Your\b/i.test(sents[0].trim())) {
+    score -= 10;
+    if (isDev) console.log('[nuclear-v2] yourOpener penalty', { text });
+  }
+  // Trope penalties: "disagrees" / "deserves better"
+  if (/\bdisagrees\b/i.test(text)) {
+    score -= 14;
+    if (isDev) console.log('[nuclear-v2] disagreesTrope penalty', { text });
+  }
+  if (/\bdeserves better\b/i.test(text)) {
+    score -= 10;
+    if (isDev) console.log('[nuclear-v2] deservesBetterTrope penalty', { text });
   }
   return { valid: true, score, reason: null };
 }
@@ -3822,7 +3850,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     if (!finalRoast) {
       const safeFormatCandidates = results.filter(r => {
         const reason = r.reason;
-        return reason === 'missingDetails' || reason === 'missingScene' || reason === 'noS1Anchor' || reason === 'phraseFatigue' || reason === 'templateStem' || reason === 'globalRepeat' || reason === 'weakMicdrop';
+        return reason === 'missingDetails' || reason === 'missingScene' || reason === 'noS1Anchor' || reason === 'templateStem' || reason === 'globalRepeat' || reason === 'weakMicdrop';
       }).filter(r => {
         // Re-verify safety + format on these (relax micdrop for intermediate)
         const t = r.text;
@@ -4048,6 +4076,19 @@ const SV2_STRUCTURE_TEMPLATES = [
   { id: 'V10', tpl: 'That {TARGET} is proof that {CRITIQUE}.' },
 ];
 
+const SV2_TEMPLATE_FAMILY = {
+  V01: 'FAMILY_YOUR',
+  V02: 'FAMILY_THAT',
+  V03: 'FAMILY_THE',
+  V04: 'FAMILY_NOBODY',
+  V05: 'FAMILY_YOUR',
+  V06: 'FAMILY_EVEN',
+  V07: 'FAMILY_MISC',
+  V08: 'FAMILY_YOUR',
+  V09: 'FAMILY_MISC',
+  V10: 'FAMILY_THAT',
+};
+
 // --- Savage V2 Targets (25+) ---
 const SV2_TARGET_BUCKET = [
   'hairline', 'posture', 'fit', 'smile', 'jawline', 'outfit', 'stance',
@@ -4071,6 +4112,52 @@ const SV2_CRITIQUE_BUCKET = [
   'carries the whole disappointment', 'does zero favors', 'reeks of last resort',
 ];
 
+// Clause critiques: verbs/phrases that follow "Your {TARGET} ..."
+const SV2_CRITIQUE_CLAUSE = [
+  'gave up halfway', 'lost the plot', 'missed the memo',
+  'peaked in 2019', 'called in sick',
+  'committed to nothing', 'skipped the tutorial',
+  'ran out of ideas', 'overcompensates', 'tries too hard',
+  'forgot to be convincing', 'fronts harder than it delivers',
+  'tells on you', 'raises concerns', 'lowers the bar',
+  'peaked already', 'auditioned and lost',
+  'delivers diminishing returns', 'set the bar underground',
+  'came pre-defeated', 'proves the point', 'does zero favors',
+  'is mid with confidence', 'looks AI-generated', 'belongs in drafts',
+  'is fighting the algorithm', 'is confidence without clearance',
+  'screams unpaid internship', 'peaked before you pressed post',
+  'is bold without permission', 'is buffering in real time',
+  'is sponsored by delusion', 'is participation trophy energy',
+  'is commitment to nothing', 'is allergic to self-awareness',
+  'is mid but committed', 'is trying hard in the wrong direction',
+];
+
+// Noun-phrase critiques: work after "says" or "to know"
+const SV2_CRITIQUE_NOUN = [
+  'a rough draft', 'a cry for help', 'last resort energy',
+  'zero follow-through', 'diminishing returns', 'the wrong answer',
+  'borrowed confidence', 'a participation trophy', 'the bare minimum',
+  'nothing new', 'unfinished business', 'a warning label',
+  'pre-defeat energy', 'the whole disappointment', 'a second draft at best',
+];
+
+// "that"-clause critiques: read after "is proof that ..."
+const SV2_CRITIQUE_THAT = [
+  'you gave up halfway', 'nobody proofread this', 'effort is optional',
+  'this was rushed', 'confidence is unearned', 'the bar is underground',
+  'trying harder is not the move', 'the preview was better',
+  'less is not always more', 'not everything deserves a post',
+  'the rough draft won', 'validation was the whole plan',
+];
+
+// "and"-clause critiques: read after "One look at that {TARGET} and ..."
+const SV2_CRITIQUE_AND = [
+  'you gave up halfway', 'you lost the plot', 'you missed the memo',
+  'you peaked in 2019', 'it needs a second draft', 'it went through the motions',
+  'it works against you', "it's the wrong answer", "it's a cry for help",
+  "it's last resort energy",
+];
+
 // --- Savage V2 Escalations (25+) — lighter than nuclear ---
 const SV2_ESCALATION_BUCKET = [
   'Not the flex', 'Bold choice', 'The room noticed',
@@ -4084,6 +4171,39 @@ const SV2_ESCALATION_BUCKET = [
   'Not quite', 'Points for trying',
 ];
 
+// Full short sentences for ". {ESCALATION}." slots
+const SV2_ESCALATION_SENTENCE = [
+  'Read that back', 'Be serious', 'Try again',
+  'Nobody asked', 'The room noticed', 'Results are in',
+  'Barely counts', 'Return to drafts', 'Not quite',
+  'Respectfully no', 'Reality check', 'Start over',
+  'In public', 'Delete this', 'Wild choice',
+  'Respectfully', 'The group chat noticed', 'You had time',
+  'Not the flex', "That's brave", 'Bold in the worst way',
+  "This wasn't it",
+];
+
+// Fragment tags for "— {ESCALATION}" slots
+const SV2_ESCALATION_TAG = [
+  'Not the flex', 'Bold choice', 'Swing and a miss',
+  'Wrong audience', 'Rough draft energy', 'Almost something',
+  'Not the serve', 'Bold move', 'Work in progress',
+  'Off-brand energy', 'Participation trophy', 'Wrong energy',
+  'Didn\'t land', 'Barely registered', 'Points for trying',
+];
+
+// --- Savage V2 Micro Templates (short viral punches) ---
+const SV2_MICRO_TEMPLATES = [
+  '{TARGET}. Mid with confidence. In public.',
+  "{TARGET}. That's brave. The room noticed.",
+  '{TARGET}. Delete this. You had time.',
+  '{TARGET}. In public? Wild choice.',
+  'Mid with confidence. {TARGET}. Not the flex.',
+  'Confidence without clearance. The room noticed.',
+  '{TARGET}. Bold for no reason. Be serious.',
+  "{TARGET}. This wasn't it. Try again.",
+];
+
 // --- Savage V2 Safe Fallbacks ---
 const SV2_SAFE_FALLBACKS = [
   'That angle was a creative choice. Creative, not effective.',
@@ -4092,6 +4212,8 @@ const SV2_SAFE_FALLBACKS = [
   'Your confidence walked in before your talent did.',
   'That effort was voluntary and it still underdelivered.',
 ];
+
+const SV2_LOCAL_CANDIDATES = 8;
 
 // --- Per-client Savage V2 state ---
 const savageClientState = new Map();
@@ -4138,43 +4260,180 @@ function sv2CleanOutput(text) {
 async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
   const isDev = process.env.NODE_ENV !== 'production';
   const state = getSavageClientState(clientId);
-  const maxAttempts = 3;
-  let attempts = 0;
+  const clientKey = clientId || 'anon';
+  const recentFamilies = getSavageFamilyHistory(clientKey);
+  const structHistory = savageStructureHistory.get(clientId) || [];
   let fallbackUsed = false;
-  let pickedTarget = null;
   let pickedStructure = null;
+  let pickedTarget = null;
   let finalRoast = null;
   let wordCount = 0;
 
-  while (attempts < maxAttempts) {
-    attempts++;
-
-    // 1. Select with per-client avoidance (reuse nv2SelectWithAvoidance)
-    const structure = nv2SelectWithAvoidance(
-      SV2_STRUCTURE_TEMPLATES, state.recentStructures, NV2_MAX_SELECT_TRIES
-    );
-    const target = nv2SelectWithAvoidance(
+  // 0. Micro-template fast path (~12% chance)
+  const useMicro = Math.random() < 0.12;
+  if (useMicro) {
+    const microTarget = nv2SelectWithAvoidance(
       SV2_TARGET_BUCKET, state.recentTargets, NV2_MAX_SELECT_TRIES
     );
-    const critique = SV2_CRITIQUE_BUCKET[Math.floor(Math.random() * SV2_CRITIQUE_BUCKET.length)];
-    const escalation = SV2_ESCALATION_BUCKET[Math.floor(Math.random() * SV2_ESCALATION_BUCKET.length)];
+    const capTarget = microTarget.charAt(0).toUpperCase() + microTarget.slice(1);
+    let microTpl = SV2_MICRO_TEMPLATES[Math.floor(Math.random() * SV2_MICRO_TEMPLATES.length)];
+    let microResult = microTpl.replace('{TARGET}', capTarget);
+    let microWc = microResult.split(/\s+/).length;
 
-    pickedStructure = structure;
-    pickedTarget = target;
+    // Reroll once if too short
+    if (microWc < 9) {
+      microTpl = SV2_MICRO_TEMPLATES[Math.floor(Math.random() * SV2_MICRO_TEMPLATES.length)];
+      microResult = microTpl.replace('{TARGET}', capTarget);
+      microWc = microResult.split(/\s+/).length;
+    }
 
-    // 2. Assemble skeleton
-    const skeleton = structure.tpl
+    // If still too short, fall through to normal candidate path
+    if (microWc < 9) {
+      if (isDev) console.log(`[savage-v2] micro too short (${microWc}w), falling through to candidates`);
+    } else if (!nv2HasBannedPatterns(microResult) && isPlaySafe(microResult)) {
+      pickedStructure = { id: 'MICRO' };
+      pickedTarget = microTarget;
+      finalRoast = microResult;
+      wordCount = finalRoast.split(/\s+/).length;
+
+      pushSavageClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id);
+      const prevHistory = savageStructureHistory.get(clientId) || [];
+      savageStructureHistory.set(clientId, [pickedStructure.id, ...prevHistory].slice(0, 3));
+      pushSavageFamilyHistory(clientId, 'FAMILY_MISC');
+
+      if (isDev) {
+        console.log(`[savage-v2] micro clientId=${clientId} target="${pickedTarget}" words=${wordCount}`);
+        console.log(`[savage-v2] result="${finalRoast}"`);
+      }
+
+      const microMeta = {
+        tier: 'savage',
+        useMicro: true,
+        structureId: 'MICRO',
+        familyId: 'FAMILY_MISC',
+        target: pickedTarget,
+        wordCount,
+        candidatesCount: 1,
+        winnerScore: null,
+      };
+      return { roast: finalRoast, meta: microMeta };
+    } else {
+      // Micro fails validation, fall through to normal candidate path
+      if (isDev) console.log(`[savage-v2] micro failed validation, falling through to candidates`);
+    }
+  }
+
+  // 1. Build local skeleton candidates and score them
+  const candidates = [];
+  const batchRecentStructures = [...state.recentStructures];
+  const batchRecentTargets = [...state.recentTargets];
+  for (let i = 0; i < SV2_LOCAL_CANDIDATES; i++) {
+    // Pick structure with avoidance, then apply family fatigue reroll-once
+    let structure = nv2SelectWithAvoidance(
+      SV2_STRUCTURE_TEMPLATES, batchRecentStructures, NV2_MAX_SELECT_TRIES
+    );
+    let familyId = SV2_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+    let rerolled = false;
+
+    if (recentFamilies.includes(familyId)) {
+      const altTemplates = SV2_STRUCTURE_TEMPLATES.filter(t => {
+        const fam = SV2_TEMPLATE_FAMILY[t.id] || 'FAMILY_MISC';
+        return fam !== familyId;
+      });
+      if (altTemplates.length > 0) {
+        structure = nv2SelectWithAvoidance(
+          altTemplates, batchRecentStructures, NV2_MAX_SELECT_TRIES
+        );
+        familyId = SV2_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+        rerolled = true;
+      }
+    }
+    batchRecentStructures.push(structure.id);
+    if (batchRecentStructures.length > 6) batchRecentStructures.shift();
+
+    const target = nv2SelectWithAvoidance(
+      SV2_TARGET_BUCKET, batchRecentTargets, NV2_MAX_SELECT_TRIES
+    );
+    batchRecentTargets.push(typeof target === 'object' ? target.id : target);
+    if (batchRecentTargets.length > 6) batchRecentTargets.shift();
+    // Template-aware critique selection
+    let critPool = SV2_CRITIQUE_CLAUSE;
+    if (structure.id === 'V08' || structure.id === 'V04') critPool = SV2_CRITIQUE_NOUN;
+    else if (structure.id === 'V07') critPool = SV2_CRITIQUE_AND;
+    else if (structure.id === 'V10') critPool = SV2_CRITIQUE_THAT;
+    const critique = critPool[Math.floor(Math.random() * critPool.length)];
+
+    // Template-aware escalation selection
+    const usesSentenceEsc = ['V02', 'V05', 'V06', 'V08'].includes(structure.id);
+    const usesTagEsc = ['V01', 'V09'].includes(structure.id);
+    let escPool = SV2_ESCALATION_BUCKET;
+    if (usesSentenceEsc) escPool = SV2_ESCALATION_SENTENCE;
+    else if (usesTagEsc) escPool = SV2_ESCALATION_TAG;
+    const escalation = escPool[Math.floor(Math.random() * escPool.length)];
+
+    // Plural subject–verb agreement for "{TARGET} {CRITIQUE}" templates
+    let finalCritique = critique;
+    const pluralTargets = new Set(['glasses', 'shoes', 'pants', 'jeans', 'socks']);
+    if ((pluralTargets.has(target) || target.endsWith('s')) &&
+        ['V01', 'V02', 'V03', 'V05', 'V06', 'V09'].includes(structure.id)) {
+      finalCritique = finalCritique
+        .replace(/^needs /, 'need ')
+        .replace(/^works /, 'work ')
+        .replace(/^fronts /, 'front ');
+    }
+
+    let tpl = structure.tpl;
+    // V07 plural grammar: "One look at that" -> "One look at those"
+    if (structure.id === 'V07' && (target.endsWith('s') || ['glasses', 'shoes', 'eyebrows'].includes(target))) {
+      tpl = tpl.replace('that {TARGET}', 'those {TARGET}');
+    }
+
+    const skeleton = tpl
       .replace('{TARGET}', target)
-      .replace('{CRITIQUE}', critique)
+      .replace('{CRITIQUE}', finalCritique)
       .replace('{ESCALATION}', escalation);
 
-    if (isDev) console.log(`[savage-v2] attempt=${attempts} skeleton="${skeleton}"`);
+    const wc = skeleton.split(/\s+/).length;
 
-    // 3. GPT polish (rewrite-only) — skipped in TUNING_MODE to preserve skeleton
-    let polished = skeleton;
+    // Score using existing rules
+    let wcScore = 0;
+    if (wc <= 8) wcScore -= 12;
+    else if (wc === 9) wcScore -= 2;
+    else if (wc >= 10 && wc <= 14) wcScore += 12;
+    if (wc >= 11 && wc <= 12) wcScore += 6;
+    if (wc > 16) wcScore -= 6;
+
+    // V04 dominance penalty
+    if (structure.id === 'V04') wcScore -= 10;
+
+    // Structure fatigue penalty
+    if (structHistory.includes(structure.id)) wcScore -= 12;
+
+    candidates.push({ structure, familyId, rerolled, target, critique, escalation, skeleton, wcScore, wordCount: wc });
+  }
+
+  // 2. Sort candidates: highest wcScore first; tie-break by word count proximity to 11–12
+  candidates.sort((a, b) => {
+    if (b.wcScore !== a.wcScore) return b.wcScore - a.wcScore;
+    const aInSweet = (a.wordCount >= 11 && a.wordCount <= 12) ? 1 : 0;
+    const bInSweet = (b.wordCount >= 11 && b.wordCount <= 12) ? 1 : 0;
+    if (bInSweet !== aInSweet) return bInSweet - aInSweet;
+    const aInGood = (a.wordCount >= 10 && a.wordCount <= 14) ? 1 : 0;
+    const bInGood = (b.wordCount >= 10 && b.wordCount <= 14) ? 1 : 0;
+    return bInGood - aInGood;
+  });
+
+  if (process.env.TUNING_MODE) {
+    const uniqueTemplates = new Set(candidates.map(c => c.structure.id)).size;
+    const top3 = candidates.slice(0, 3).map((c, i) => `#${i + 1} template=${c.structure.id} family=${c.familyId} wc=${c.wordCount} score=${c.wcScore}`);
+    console.log('[sav2] uniqueTemplates=%d/%d top3: %s', uniqueTemplates, SV2_LOCAL_CANDIDATES, top3.join(' | '));
+  }
+
+  // 3. Polish best candidate (fallback to 2nd-best if validation fails)
+  async function polishAndValidate(candidate) {
+    let polished = candidate.skeleton;
     if (!process.env.TUNING_MODE) {
-      const polishPrompt = `Rewrite this EXACT roast to sound more natural and punchy. Do NOT add new ideas, do NOT change the target, do NOT add new sentences. Keep 1–2 sentences. 12–26 words preferred. Do NOT use questions. Output ONLY the rewritten roast, nothing else.\n\nRoast: "${skeleton}"`;
-
+      const polishPrompt = `Rewrite this EXACT roast to sound more natural and punchy. Do NOT add new ideas, do NOT change the target, do NOT add new sentences. Keep 1–2 sentences. 12–26 words preferred. Do NOT use questions. Output ONLY the rewritten roast, nothing else.\n\nRoast: "${candidate.skeleton}"`;
       try {
         const polishOpts = {
           model: 'gpt-4o',
@@ -4193,63 +4452,60 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
           top_p: 0.9,
         };
         const polishResp = await openai.responses.create(polishOpts);
-        if (polishResp.output_text) {
-          polished = polishResp.output_text;
-        }
+        if (polishResp.output_text) polished = polishResp.output_text;
       } catch (err) {
         if (isDev) console.log(`[savage-v2] polish LLM error: ${err.message}`);
       }
     }
 
-    // 4. Clean
     let result = sv2CleanOutput(polished);
-
-    // 5. Validate — reuse shared filters
     if (nv2HasBannedPatterns(result)) {
-      if (isDev) console.log(`[savage-v2] banned pattern detected, retrying`);
-      continue;
+      if (isDev) console.log(`[savage-v2] banned pattern detected`);
+      return null;
     }
     if (!isPlaySafe(result)) {
-      if (isDev) console.log(`[savage-v2] play-safe filter triggered, retrying`);
-      continue;
+      if (isDev) console.log(`[savage-v2] play-safe filter triggered`);
+      return null;
     }
-
-    wordCount = result.split(/\s+/).length;
-    if (wordCount > 30) {
-      result = sv2CleanOutput(result);
-      wordCount = result.split(/\s+/).length;
-    }
-
-    // Word count scoring: soft preference for 10–14 words
-    let wcScore = 0;
-    if (wordCount >= 10 && wordCount <= 14) wcScore += 12;
-    if (wordCount < 8) wcScore -= 10;
-    if (wordCount > 16) wcScore -= 6;
-
-    // Structure fatigue: penalize reuse of recent structureIds
-    const structHistory = savageStructureHistory.get(clientId) || [];
-    if (structHistory.includes(structure.id)) {
-      wcScore -= 12;
-      if (isDev) console.log(`[savage-v2] structureFatigue penalty structureId=${structure.id}`);
-    }
-
-    if (wcScore < 0 && attempts < maxAttempts) {
-      if (isDev) console.log(`[savage-v2] low score=${wcScore} wc=${wordCount}, retrying`);
-      continue;
-    }
-
-    finalRoast = result;
-    break;
+    if (result.split(/\s+/).length > 30) result = sv2CleanOutput(result);
+    return result;
   }
 
-  // Fallback
+  // Try best candidate
+  const best = candidates[0];
+  finalRoast = await polishAndValidate(best);
+  if (finalRoast) {
+    pickedStructure = best.structure;
+    pickedTarget = best.target;
+    wordCount = finalRoast.split(/\s+/).length;
+  }
+
+  // Fallback: try 2nd-best candidate (one extra polish attempt max)
+  if (!finalRoast && candidates.length > 1) {
+    const second = candidates[1];
+    if (isDev) console.log(`[savage-v2] best failed validation, trying 2nd-best template=${second.structure.id}`);
+    finalRoast = await polishAndValidate(second);
+    if (finalRoast) {
+      pickedStructure = second.structure;
+      pickedTarget = second.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
+  }
+
+  // Safe fallback
   if (!finalRoast) {
     fallbackUsed = true;
     finalRoast = SV2_SAFE_FALLBACKS[Math.floor(Math.random() * SV2_SAFE_FALLBACKS.length)];
     wordCount = finalRoast.split(/\s+/).length;
     pickedStructure = { id: 'FALLBACK' };
     pickedTarget = 'fallback';
-    if (isDev) console.log(`[savage-v2] all attempts failed, using safe fallback`);
+    if (isDev) console.log(`[savage-v2] all candidates failed, using safe fallback`);
+  }
+
+  // Plural agreement fix for plural targets
+  const SV2_PLURAL_TARGETS = new Set(['glasses', 'shoes', 'eyebrows', 'pants', 'jeans', 'socks']);
+  if (pickedTarget && (SV2_PLURAL_TARGETS.has(pickedTarget) || pickedTarget.endsWith('s'))) {
+    finalRoast = finalRoast.replace(/ is /g, ' are ').replace(/ needs /g, ' need ').replace(/ tells /g, ' tell ');
   }
 
   pushSavageClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id);
@@ -4258,37 +4514,26 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
   const prevHistory = savageStructureHistory.get(clientId) || [];
   savageStructureHistory.set(clientId, [pickedStructure.id, ...prevHistory].slice(0, 3));
 
+  // Update template family fatigue history (keep last 3)
+  const finalFamily = SV2_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC';
+  pushSavageFamilyHistory(clientId, finalFamily);
+
   if (isDev) {
-    console.log(`[savage-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" attempts=${attempts} fallback=${fallbackUsed} words=${wordCount}`);
+    console.log(`[savage-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" fallback=${fallbackUsed} words=${wordCount}`);
     console.log(`[savage-v2] result="${finalRoast}"`);
   }
 
-  if (process.env.TUNING_MODE) {
-    return {
-      roast: finalRoast,
-      meta: {
-        tier: 'savage',
-        isUsableFace: null,
-        detailPackWeak: null,
-        anchorsCount: null,
-        candidatesCount: typeof attempts !== 'undefined' ? attempts : null,
-        validCount: null,
-        rejectedReasons: null,
-        winnerScore: null,
-      },
-    };
-  }
-  return {
-    roast: finalRoast,
-    meta: {
-      pickedStructureId: pickedStructure.id,
-      pickedTarget,
-      attempts,
-      fallbackUsed,
-      clientId,
-      wordCount,
-    },
+  const normalMeta = {
+    tier: 'savage',
+    useMicro: false,
+    structureId: pickedStructure.id,
+    familyId: SV2_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC',
+    target: pickedTarget,
+    wordCount,
+    candidatesCount: SV2_LOCAL_CANDIDATES,
+    winnerScore: best ? best.wcScore : null,
   };
+  return { roast: finalRoast, meta: normalMeta };
 }
 
 // --- Medium V2: single-winner candidate pipeline ---
