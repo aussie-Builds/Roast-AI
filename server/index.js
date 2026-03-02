@@ -3340,7 +3340,7 @@ function nv2ContradictsFacts(text, facts) {
 
 // --- Nuclear V2 freeform candidate generation ---
 async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
-  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Avoid starting sentence 1 with "Your". Prefer non-"Your" openers ~70% of the time. Good starters: "Somebody lied to you about…", "Nobody warned you that…", "You really posted this like…", "This is the kind of photo that…", "The room clocked…", "Be honest…"\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Do NOT use the trope "Even the <object/person> looks embarrassed/judging/disagrees" or endings like "X disagrees", "X deserves better".\n- Mention lighting ONLY if extremely bright or dim, never in the first 6 words, and only once.\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.`;
+  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Avoid starting sentence 1 with "Your". Prefer non-"Your" openers ~70% of the time. Good starters: "Somebody lied to you about…", "Nobody warned you that…", "You really posted this like…", "This is the kind of photo that…", "The room clocked…", "Be honest…"\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Do NOT use the trope "Even the <object/person> looks embarrassed/judging/disagrees" or endings like "X disagrees", "X deserves better".\n- Mention lighting ONLY if extremely bright or dim, never in the first 6 words, and only once.\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.\n- Avoid using "You really posted this..." more than ~20% of the time. Vary your openers.\n- Avoid using "Delete this" as the sentence 2 closer too often; prefer varied finality (pick one, 3–7 words): "Receipts already exist.", "Permanently on record.", "The room clocked it.", "No recovery from this.", "Close Friends removed you.", "Comments would be brutal.", "Muted in real time.", "Archived for a reason.", "Filed under cringe.", "Group chat saw it."\n- Avoid repeating the same micdrop wording across roasts.`;
   const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Sentence 1: reference ≥2 visible details. Sentence 2: 3–7 word cold punchline ending in "." only (no "!"). Be specific, original, punchy.`;
 
   const calls = Array.from({ length: n }, () =>
@@ -3353,7 +3353,7 @@ async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
           { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
         ]},
       ],
-      max_output_tokens: 60,
+      max_output_tokens: 65,
       temperature: 0.78,
     }).then(r => r.output_text || null).catch(() => null)
   );
@@ -3432,6 +3432,28 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
     const penalty = Math.min(phraseFatigueHits * 14, 28);
     score -= penalty;
     if (isDev) console.log(`[nuclear-v2] phraseFatigue penalty -${penalty} hits=${phraseFatigueHits} text="${text.slice(0, 60)}"`);
+  }
+  // J2. "You really posted this" opener fatigue: penalize if any of last 3 winners also used it
+  {
+    const YRPT_RE = /\byou really posted this\b/i;
+    if (YRPT_RE.test(text)) {
+      const recentWinners = clientState.nv2RecentWinners || [];
+      if (recentWinners.some(t => YRPT_RE.test(t))) {
+        score -= 8;
+        if (isDev) console.log(`[nuclear-v2] youReallyPostedThis fatigue penalty -8`);
+      }
+    }
+  }
+  // J3. "Screenshots already exist" S2 fatigue: penalize if last 3 winners ended the same way
+  {
+    const SAE_RE = /screenshots already exist\.?$/i;
+    if (SAE_RE.test(text.trim())) {
+      const recentWinners = clientState.nv2RecentWinners || [];
+      if (recentWinners.some(t => SAE_RE.test(t.trim()))) {
+        score -= 10;
+        if (isDev) console.log(`[nuclear-v2] screenshotsAlreadyExist fatigue penalty -10`);
+      }
+    }
   }
   // K. Soft opener
   if (s1IsSoft(text)) return { valid: false, score: 0, reason: 'softOpener' };
@@ -3518,6 +3540,27 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
     if (fatigueActive && !mentionsLightingNow) {
       score += 20;
       if (isDev) console.log('[nuclear-v2] antiLighting bonus', { text });
+    }
+  }
+  // N6b. Lighting clamp: penalize casual lighting mentions that lack extreme markers
+  {
+    const CASUAL_LIGHTING_RE = /\b(lighting|dim|bright)\b/i;
+    const EXTREME_LIGHTING_RE = /\b(pitch[- ]black|barely visible|blinding|washed out|spotlight|harsh flash|neon glare)\b/i;
+    if (CASUAL_LIGHTING_RE.test(text) && !EXTREME_LIGHTING_RE.test(text)) {
+      score -= 12;
+      if (isDev) console.log('[nuclear-v2] lightingClamp penalty -12', { text: text.slice(0, 60) });
+    }
+  }
+  // N6c. Lighting-over-scene penalty: if scene is rich (2+ non-lighting anchors), penalize lighting mentions
+  {
+    const CASUAL_LIGHTING_RE2 = /\b(lighting|dim|bright)\b/i;
+    if (CASUAL_LIGHTING_RE2.test(text)) {
+      const LIGHTING_ANCHOR_RE = /^(lighting|dim|bright|harsh|backlit|mixed|screen glow|dark|shadow|shadows)$/i;
+      const nonLightingSceneAnchors = (sceneAnchors || []).filter(a => !LIGHTING_ANCHOR_RE.test(a));
+      if (nonLightingSceneAnchors.length >= 2) {
+        score -= 10;
+        if (isDev) console.log('[nuclear-v2] lightingOverScene penalty -10', { nonLightingSceneAnchors: nonLightingSceneAnchors.slice(0, 4), text: text.slice(0, 60) });
+      }
     }
   }
   // N7. "Your dim garage selfie" lead penalty
@@ -3695,6 +3738,7 @@ function nv2ValidateCandidate(text, { detailAnchors, sceneAnchors, clientState, 
 
 // --- Main Nuclear V2 generator ---
 async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTargets = [], selfieTags = null }) {
+  const t0 = Date.now();
   const isDev = process.env.NODE_ENV !== 'production';
   const state = getClientState(clientId);
   let fallbackUsed = false;
@@ -3795,8 +3839,10 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   const tagObjects = tags.objects.slice(0, 6).map(s => s.toLowerCase().trim()).filter(s => s.length >= 3);
 
   // Generate candidates in parallel (more when face is unusable)
-  const genN = isUsableFace ? 8 : 12;
+  const genN = isUsableFace ? 6 : 8;
   const rawCandidates = await nv2GenerateCandidates({ imageBase64, detailsBlock, n: genN });
+  const t1 = Date.now();
+  console.log(`[nuclear-v2] generationTime=${t1 - t0}ms`);
 
   // Validate + score
   const results = rawCandidates.map(raw => {
@@ -4007,6 +4053,9 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   if (isDev) {
     console.log(`[nuclear-v2] result="${finalRoast}" wordCount=${wordCount}`);
   }
+
+  const t2 = Date.now();
+  console.log(`[nuclear-v2] totalTime=${t2 - t0}ms`);
 
   if (process.env.TUNING_MODE) {
     return {
