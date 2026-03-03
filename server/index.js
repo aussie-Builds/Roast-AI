@@ -3338,16 +3338,22 @@ function nv2ContradictsFacts(text, facts) {
   return reasons.length > 0 ? reasons : null;
 }
 
-// --- Nuclear V2 freeform candidate generation ---
+// --- Nuclear V2 system prompt (shared) ---
+const NV2_SYSTEM_MSG = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Avoid starting sentence 1 with "Your". Prefer non-"Your" openers ~70% of the time. Good starters: "Somebody lied to you about…", "Nobody warned you that…", "You really posted this like…", "This is the kind of photo that…", "The room clocked…", "Be honest…"\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Do NOT use the trope "Even the <object/person> looks embarrassed/judging/disagrees" or endings like "X disagrees", "X deserves better".\n- Mention lighting ONLY if extremely bright or dim, never in the first 6 words, and only once.\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.\n- Avoid using "You really posted this..." more than ~20% of the time. Vary your openers.\n- Avoid using "Delete this" as the sentence 2 closer too often; prefer varied finality (pick one, 3–7 words): "Receipts already exist.", "Permanently on record.", "The room clocked it.", "No recovery from this.", "Close Friends removed you.", "Comments would be brutal.", "Muted in real time.", "Archived for a reason.", "Filed under cringe.", "Group chat saw it."\n- Avoid repeating the same micdrop wording across roasts.`;
+
+// --- Nuclear V2 freeform candidate generation (multi-call parallel) ---
+function nv2BuildCandidateUserMsg(detailsBlock) {
+  return `${detailsBlock}\n\nWrite one 2-sentence roast caption. Sentence 1: reference ≥2 visible details. Sentence 2: 3–7 word cold punchline ending in "." only (no "!"). Be specific, original, punchy.`;
+}
+
 async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
-  const systemMsg = `You write brutally funny 2-sentence roast captions for selfie photos. Rules:\n- EXACTLY 2 sentences, 12–26 words total.\n- Sentence 1: reference AT LEAST 2 provided visible details.\n- Sentence 2: 3–7 words preferred (2–12 allowed), cold punchline, NO exclamation marks, NO questions, no emojis/hashtags. Must end with ".".\n- Must NOT start sentence 2 with "Even", "And", "But", or "So".\n- No quotes, no profanity.\n- Avoid: "your expression", "your vibe", "your energy", "your aura", "it's giving".\n- Avoid starting sentence 1 with "Your". Prefer non-"Your" openers ~70% of the time. Good starters: "Somebody lied to you about…", "Nobody warned you that…", "You really posted this like…", "This is the kind of photo that…", "The room clocked…", "Be honest…"\n- Do NOT start sentence 1 with: "When your", "The lighting", "This lighting", "In this lighting".\n- Do NOT use the trope "Even the <object/person> looks embarrassed/judging/disagrees" or endings like "X disagrees", "X deserves better".\n- Mention lighting ONLY if extremely bright or dim, never in the first 6 words, and only once.\n- Roast visible styling, pose, effort, setting — never body, identity, or physical features.\n- Be blunt, specific, original. Google Play safe.\nNUCLEAR TONE:\n- Roast the person's confidence and decision to post this.\n- Imply they believed this looked good.\n- Attack the ego behind the photo, not just the objects in it.\n- Avoid observational-only jokes; make it socially cutting.\n- Cold, controlled, humiliating — not playful.\n- Avoid generic puns, catchphrases, and job-title taglines.\n- Avoid abstract roast crutches like confidence/charisma/vibes/energy/aura; use concrete, photo-specific insults.\n- Avoid using "You really posted this..." more than ~20% of the time. Vary your openers.\n- Avoid using "Delete this" as the sentence 2 closer too often; prefer varied finality (pick one, 3–7 words): "Receipts already exist.", "Permanently on record.", "The room clocked it.", "No recovery from this.", "Close Friends removed you.", "Comments would be brutal.", "Muted in real time.", "Archived for a reason.", "Filed under cringe.", "Group chat saw it."\n- Avoid repeating the same micdrop wording across roasts.`;
-  const userMsg = `${detailsBlock}\n\nWrite one 2-sentence roast caption. Sentence 1: reference ≥2 visible details. Sentence 2: 3–7 word cold punchline ending in "." only (no "!"). Be specific, original, punchy.`;
+  const userMsg = nv2BuildCandidateUserMsg(detailsBlock);
 
   const calls = Array.from({ length: n }, () =>
     openai.responses.create({
       model: 'gpt-4o',
       input: [
-        { role: 'system', content: systemMsg },
+        { role: 'system', content: NV2_SYSTEM_MSG },
         { role: 'user', content: [
           { type: 'input_text', text: userMsg },
           { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
@@ -3358,6 +3364,165 @@ async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
     }).then(r => r.output_text || null).catch(() => null)
   );
   return (await Promise.all(calls)).filter(Boolean);
+}
+
+// --- Nuclear V2 early-accept candidate generation ---
+const NV2_EARLY_ACCEPT_TIMECAP_MS = 6000;
+const NV2_TOPUP_COUNT = 2;
+const NV2_TOPUP_TIMEOUT_MS = 6000;
+const NV2_TOPUP_TEMPERATURE = 0.72;
+
+async function nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n, validateFn }) {
+  const userMsg = nv2BuildCandidateUserMsg(detailsBlock);
+  const genStart = Date.now();
+  const results = [];
+  let resolved = false;
+  let timeToFirstValid = null;
+  let timeToThirdValid = null;
+
+  // Phase 1: launch N calls, accept early when conditions met
+  const phase1Reason = await new Promise((resolve) => {
+    const tryAccept = () => {
+      const valid = results.filter(r => r.valid);
+      if (valid.length >= 3) { finish('validCount'); return; }
+    };
+
+    const finish = (reason) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timecapTimer);
+      resolve(reason);
+    };
+
+    const timecapTimer = setTimeout(() => finish('timecap'), NV2_EARLY_ACCEPT_TIMECAP_MS);
+
+    let settledCount = 0;
+    const calls = Array.from({ length: n }, () =>
+      openai.responses.create({
+        model: 'gpt-4o',
+        input: [
+          { role: 'system', content: NV2_SYSTEM_MSG },
+          { role: 'user', content: [
+            { type: 'input_text', text: userMsg },
+            { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+          ]},
+        ],
+        max_output_tokens: 65,
+        temperature: 0.78,
+      }).then(r => r.output_text || null).catch(() => null)
+    );
+
+    calls.forEach(p => p.then(raw => {
+      if (resolved) return;
+      settledCount++;
+      if (raw) {
+        const validated = validateFn(raw);
+        results.push(validated);
+        if (validated.valid) {
+          const elapsed = Date.now() - genStart;
+          const validCount = results.filter(r => r.valid).length;
+          if (validCount === 1 && timeToFirstValid === null) timeToFirstValid = elapsed;
+          if (validCount === 3 && timeToThirdValid === null) timeToThirdValid = elapsed;
+          tryAccept();
+        }
+      }
+      if (settledCount >= n && !resolved) {
+        clearTimeout(timecapTimer);
+        finish('allSettled');
+      }
+    }));
+  });
+
+  const preTopUpValidCount = results.filter(r => r.valid).length;
+
+  // Phase 2: top-up on timecap or allSettled when validCount < 3
+  let topUpAttempted = false;
+  let topUpValidCount = 0;
+  if ((phase1Reason === 'timecap' || phase1Reason === 'allSettled') && preTopUpValidCount < 3) {
+    topUpAttempted = true;
+    const isDev = process.env.NODE_ENV !== 'production';
+    if (isDev) console.log(`[nuclear-v2] topUp triggered preTopUpValid=${preTopUpValidCount} reason=${phase1Reason}`);
+
+    const topUpCalls = Array.from({ length: NV2_TOPUP_COUNT }, () => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), NV2_TOPUP_TIMEOUT_MS);
+      return openai.responses.create({
+        model: 'gpt-4o-mini',
+        input: [
+          { role: 'system', content: NV2_SYSTEM_MSG },
+          { role: 'user', content: userMsg },
+        ],
+        max_output_tokens: 65,
+        temperature: NV2_TOPUP_TEMPERATURE,
+      }, { signal: ac.signal })
+        .then(r => { clearTimeout(timer); return r.output_text || null; })
+        .catch(() => { clearTimeout(timer); return null; });
+    });
+
+    const topUpResults = await Promise.all(topUpCalls);
+    for (const raw of topUpResults) {
+      if (raw) {
+        const validated = validateFn(raw);
+        results.push(validated);
+        if (validated.valid) {
+          topUpValidCount++;
+          const elapsed = Date.now() - genStart;
+          const validCount = results.filter(r => r.valid).length;
+          if (validCount === 1 && timeToFirstValid === null) timeToFirstValid = elapsed;
+          if (validCount === 3 && timeToThirdValid === null) timeToThirdValid = elapsed;
+        }
+      }
+    }
+  }
+
+  const finalValidCount = results.filter(r => r.valid).length;
+
+  return {
+    results,
+    earlyAccepted: phase1Reason !== 'allSettled',
+    earlyReason: phase1Reason,
+    timeToFirstValid,
+    timeToThirdValid,
+    preTopUpValidCount,
+    topUpAttempted,
+    topUpValidCount,
+    finalValidCount,
+  };
+}
+
+// --- Nuclear V2 batch candidate generation (single call, default) ---
+async function nv2GenerateCandidatesBatch({ imageBase64, detailsBlock, n = 5 }) {
+  const labels = Array.from({ length: n }, (_, i) => `C${i + 1}`);
+  const format = labels.map(l => `${l}: <two sentences>`).join('\n---\n');
+  const userMsg = `${detailsBlock}\n\nWrite exactly ${n} DIFFERENT 2-sentence roast captions. Each must independently follow all rules. Vary openers and punchlines across candidates — no two should start the same way or end with the same micdrop.\n\nOutput format (strictly follow, no extra text):\n${format}`;
+
+  try {
+    const resp = await openai.responses.create({
+      model: 'gpt-4o',
+      input: [
+        { role: 'system', content: NV2_SYSTEM_MSG },
+        { role: 'user', content: [
+          { type: 'input_text', text: userMsg },
+          { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+        ]},
+      ],
+      max_output_tokens: 400,
+      temperature: 0.85,
+    });
+    const raw = (resp.output_text || '').trim();
+    // Parse candidates by splitting on --- or C\d+: markers
+    const candidates = [];
+    const blocks = raw.split(/\n---\n/);
+    for (const block of blocks) {
+      const cleaned = block.replace(/^C\d+:\s*/i, '').trim();
+      if (cleaned.length > 10) candidates.push(cleaned);
+    }
+    return candidates;
+  } catch (e) {
+    const isDev = process.env.NODE_ENV !== 'production';
+    if (isDev) console.log(`[nuclear-v2] batchCall error: ${e.message}`);
+    return [];
+  }
 }
 
 // --- Nuclear V2 freeform candidate validation ---
@@ -3838,25 +4003,40 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   const selfieAttrs = [tags.hair, tags.outfit, tags.expression, tags.grooming, tags.bg_vibe].map(cleanTagToken).filter(Boolean);
   const tagObjects = tags.objects.slice(0, 6).map(s => s.toLowerCase().trim()).filter(s => s.length >= 3);
 
-  // Generate candidates in parallel (more when face is unusable)
-  const genN = isUsableFace ? 6 : 8;
-  const rawCandidates = await nv2GenerateCandidates({ imageBase64, detailsBlock, n: genN });
-  const t1 = Date.now();
-  console.log(`[nuclear-v2] generationTime=${t1 - t0}ms`);
+  // Generate candidates — early-accept multi-call by default, batch behind NV2_BATCH=1
+  const genN = isUsableFace ? 5 : 6;
+  const useBatch = process.env.NV2_BATCH === '1';
 
-  // Validate + score
-  const results = rawCandidates.map(raw => {
+  // Validate function used by early-accept path (clean + validate in one step)
+  const validateFn = (raw) => {
     const cleaned = nv2SanitizeQuotes(nv2CleanOutput(raw));
     const result = nv2ValidateCandidate(cleaned, { detailAnchors: finalDetailAnchors, sceneAnchors, clientState: state, isDev, sceneFiltered: filteredSceneTargets, selfieAttrs, tagObjects, lightingTag: tags.lighting || '' });
     return { text: cleaned, ...result };
-  });
-  const valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
-  const rejected = results.filter(r => !r.valid);
+  };
+
+  let results, valid, rejected, earlyMeta;
+
+  if (useBatch) {
+    const rawCandidates = await nv2GenerateCandidatesBatch({ imageBase64, detailsBlock, n: genN });
+    results = rawCandidates.map(validateFn);
+    valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
+    rejected = results.filter(r => !r.valid);
+    earlyMeta = { earlyAccepted: false, earlyReason: 'batch', timeToFirstValid: null, timeToThirdValid: null, preTopUpValidCount: valid.length, topUpAttempted: false, topUpValidCount: 0, finalValidCount: valid.length };
+  } else {
+    const ea = await nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n: genN, validateFn });
+    results = ea.results;
+    valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
+    rejected = results.filter(r => !r.valid);
+    earlyMeta = ea;
+  }
+
+  const t1 = Date.now();
+  console.log(`[nuclear-v2] generationTime=${t1 - t0}ms candidatesRequested=${genN} candidatesParsed=${results.length} mode=${useBatch ? 'batch' : 'early-accept'} earlyAccepted=${earlyMeta.earlyAccepted} earlyReason=${earlyMeta.earlyReason} preTopUpValid=${earlyMeta.preTopUpValidCount} topUp=${earlyMeta.topUpAttempted}(+${earlyMeta.topUpValidCount}) finalValidCount=${earlyMeta.finalValidCount} t1stValid=${earlyMeta.timeToFirstValid}ms t3rdValid=${earlyMeta.timeToThirdValid}ms`);
 
   if (isDev) {
     const rejectSummary = {};
     rejected.forEach(r => { rejectSummary[r.reason] = (rejectSummary[r.reason] || 0) + 1; });
-    console.log(`[nuclear-v2] candidates=${rawCandidates.length} valid=${valid.length} rejected=${JSON.stringify(rejectSummary)}`);
+    console.log(`[nuclear-v2] candidates=${results.length} valid=${valid.length} rejected=${JSON.stringify(rejectSummary)}`);
     if (valid.length > 0) console.log(`[nuclear-v2] winner score=${valid[0].score} text="${valid[0].text}"`);
   }
 
