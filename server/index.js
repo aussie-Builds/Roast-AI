@@ -3367,20 +3367,37 @@ async function nv2GenerateCandidates({ imageBase64, detailsBlock, n = 8 }) {
 }
 
 // --- Nuclear V2 early-accept candidate generation ---
-const NV2_EARLY_ACCEPT_TIMECAP_MS = 6000;
+const NV2_EARLY_ACCEPT_TIMECAP_MS = 5500;
 const NV2_TOPUP_COUNT = 2;
-const NV2_TOPUP_TIMEOUT_MS = 6000;
+const NV2_TOPUP_TIMEOUT_MS = 1500;
 const NV2_TOPUP_TEMPERATURE = 0.72;
-
-async function nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n, validateFn }) {
+const NV2_GRACE_WAIT_MS = 800;
+async function nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n, validateFn, isUsableFace = false }) {
   const userMsg = nv2BuildCandidateUserMsg(detailsBlock);
   const genStart = Date.now();
   const results = [];
   let resolved = false;
+  let settledCount = 0;
   let timeToFirstValid = null;
   let timeToThirdValid = null;
 
   // Phase 1: launch N calls, accept early when conditions met
+  // Results are accumulated incrementally even after resolve (timecap/validCount)
+  const calls = Array.from({ length: n }, () =>
+    openai.responses.create({
+      model: 'gpt-4o',
+      input: [
+        { role: 'system', content: NV2_SYSTEM_MSG },
+        { role: 'user', content: [
+          { type: 'input_text', text: userMsg },
+          { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+        ]},
+      ],
+      max_output_tokens: 65,
+      temperature: 0.78,
+    }).then(r => r.output_text || null).catch(() => null)
+  );
+
   const phase1Reason = await new Promise((resolve) => {
     const tryAccept = () => {
       const valid = results.filter(r => r.valid);
@@ -3396,25 +3413,9 @@ async function nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n, 
 
     const timecapTimer = setTimeout(() => finish('timecap'), NV2_EARLY_ACCEPT_TIMECAP_MS);
 
-    let settledCount = 0;
-    const calls = Array.from({ length: n }, () =>
-      openai.responses.create({
-        model: 'gpt-4o',
-        input: [
-          { role: 'system', content: NV2_SYSTEM_MSG },
-          { role: 'user', content: [
-            { type: 'input_text', text: userMsg },
-            { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-          ]},
-        ],
-        max_output_tokens: 65,
-        temperature: 0.78,
-      }).then(r => r.output_text || null).catch(() => null)
-    );
-
     calls.forEach(p => p.then(raw => {
-      if (resolved) return;
       settledCount++;
+      // Always accumulate results, even after timecap/early-accept resolved
       if (raw) {
         const validated = validateFn(raw);
         results.push(validated);
@@ -3423,59 +3424,103 @@ async function nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n, 
           const validCount = results.filter(r => r.valid).length;
           if (validCount === 1 && timeToFirstValid === null) timeToFirstValid = elapsed;
           if (validCount === 3 && timeToThirdValid === null) timeToThirdValid = elapsed;
-          tryAccept();
         }
       }
-      if (settledCount >= n && !resolved) {
-        clearTimeout(timecapTimer);
-        finish('allSettled');
+      // Only drive finish/accept logic before resolved
+      if (!resolved) {
+        if (results.some(r => r.valid)) tryAccept();
+        if (settledCount >= n) {
+          clearTimeout(timecapTimer);
+          finish('allSettled');
+        }
       }
     }));
   });
 
-  const preTopUpValidCount = results.filter(r => r.valid).length;
+  // Grace wait: if timecap fired with 0 results, wait briefly for first completion
+  const phase1SettledAtResolve = settledCount;
+  let graceWaitUsed = false;
+  if (phase1Reason === 'timecap' && results.length === 0 && settledCount < n) {
+    graceWaitUsed = true;
+    const isDev = process.env.NODE_ENV !== 'production';
+    if (isDev) console.log(`[nuclear-v2] grace wait: 0 results at timecap, settled=${settledCount}/${n}, waiting up to ${NV2_GRACE_WAIT_MS}ms`);
+    await Promise.race([
+      Promise.any(calls),
+      new Promise(r => setTimeout(r, NV2_GRACE_WAIT_MS)),
+    ]);
+    // calls continue to push into results via the .then above; give microtask queue a tick
+    await new Promise(r => setTimeout(r, 0));
+    if (isDev) console.log(`[nuclear-v2] grace wait done: results=${results.length} settled=${settledCount}/${n}`);
+  }
 
-  // Phase 2: top-up on timecap or allSettled when validCount < 3
+  const preTopUpValidCount = results.filter(r => r.valid).length;
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  // Phase 2: repair top-up — rewrite best failed candidates via gpt-4o-mini
+  let boosterFired = false;
+  let boosterValidAdded = 0;
   let topUpAttempted = false;
   let topUpValidCount = 0;
+  let topUpMode = null;
+  let repairedCount = 0;
+  let repairedValidCount = 0;
   if ((phase1Reason === 'timecap' || phase1Reason === 'allSettled') && preTopUpValidCount < 3) {
-    topUpAttempted = true;
-    const isDev = process.env.NODE_ENV !== 'production';
-    if (isDev) console.log(`[nuclear-v2] topUp triggered preTopUpValid=${preTopUpValidCount} reason=${phase1Reason}`);
+    const failedCandidates = results
+      .filter(r => !r.valid && r.text)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, NV2_TOPUP_COUNT);
 
-    const topUpCalls = Array.from({ length: NV2_TOPUP_COUNT }, () => {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), NV2_TOPUP_TIMEOUT_MS);
-      return openai.responses.create({
-        model: 'gpt-4o-mini',
-        input: [
-          { role: 'system', content: NV2_SYSTEM_MSG },
-          { role: 'user', content: userMsg },
-        ],
-        max_output_tokens: 65,
-        temperature: NV2_TOPUP_TEMPERATURE,
-      }, { signal: ac.signal })
-        .then(r => { clearTimeout(timer); return r.output_text || null; })
-        .catch(() => { clearTimeout(timer); return null; });
-    });
+    if (failedCandidates.length > 0) {
+      topUpAttempted = true;
+      topUpMode = 'repair';
+      repairedCount = failedCandidates.length;
+      if (isDev) console.log(`[nuclear-v2] topUp triggered mode=repair preTopUpValid=${preTopUpValidCount} reason=${phase1Reason} repairing=${repairedCount}`);
 
-    const topUpResults = await Promise.all(topUpCalls);
-    for (const raw of topUpResults) {
-      if (raw) {
-        const validated = validateFn(raw);
-        results.push(validated);
-        if (validated.valid) {
-          topUpValidCount++;
-          const elapsed = Date.now() - genStart;
-          const validCount = results.filter(r => r.valid).length;
-          if (validCount === 1 && timeToFirstValid === null) timeToFirstValid = elapsed;
-          if (validCount === 3 && timeToThirdValid === null) timeToThirdValid = elapsed;
+      const repairCalls = failedCandidates.map(candidate => {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), NV2_TOPUP_TIMEOUT_MS);
+        const repairPrompt = `Rewrite this roast caption: "${candidate.text}"
+Problem: ${candidate.reason}.
+${detailsBlock}
+Rules:
+- EXACTLY 2 sentences, 12-26 words total.
+- Sentence 1: must reference at least ONE exact visible noun from the detail list above. Start with you/your/nobody/somebody or similar direct framing.
+- Sentence 2: 3-7 word cold punchline ending in "." only (no "!"). Must NOT start with "Even", "And", "But", "So".
+- No quotes, no emojis, no hashtags, no questions.
+- Google Play safe. No slurs, no profanity.
+- Keep the comedic voice. Output ONLY the fixed caption.`;
+        return openai.responses.create({
+          model: 'gpt-4o-mini',
+          input: [
+            { role: 'system', content: 'Rewrite the caption per the rules. Output only the result, no explanation.' },
+            { role: 'user', content: repairPrompt },
+          ],
+          max_output_tokens: 65,
+          temperature: NV2_TOPUP_TEMPERATURE,
+        }, { signal: ac.signal })
+          .then(r => { clearTimeout(timer); return r.output_text || null; })
+          .catch(() => { clearTimeout(timer); return null; });
+      });
+
+      const repairResults = await Promise.all(repairCalls);
+      for (let i = 0; i < repairResults.length; i++) {
+        const raw = repairResults[i];
+        if (raw) {
+          const validated = validateFn(raw);
+          results.push(validated);
+          if (validated.valid) {
+            topUpValidCount++;
+            repairedValidCount++;
+            const elapsed = Date.now() - genStart;
+            const validCount = results.filter(r => r.valid).length;
+            if (validCount === 1 && timeToFirstValid === null) timeToFirstValid = elapsed;
+            if (validCount === 3 && timeToThirdValid === null) timeToThirdValid = elapsed;
+          }
+          if (isDev) console.log(`[nuclear-v2] repair[${i}] source="${failedCandidates[i].text}" reason=${failedCandidates[i].reason} -> valid=${validated.valid} ${validated.valid ? `score=${validated.score}` : `rejectReason=${validated.reason}`} text="${validated.text}"`);
         }
       }
     }
   }
-
-  const finalValidCount = results.filter(r => r.valid).length;
 
   return {
     results,
@@ -3483,10 +3528,18 @@ async function nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n, 
     earlyReason: phase1Reason,
     timeToFirstValid,
     timeToThirdValid,
+    phase1InitialCalls: n,
+    phase1SettledCount: settledCount,
+    graceWaitUsed,
     preTopUpValidCount,
+    boosterFired,
+    boosterValidAdded,
     topUpAttempted,
     topUpValidCount,
-    finalValidCount,
+    topUpMode,
+    repairedCount,
+    repairedValidCount,
+    finalValidCount: results.filter(r => r.valid).length,
   };
 }
 
@@ -4004,7 +4057,7 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   const tagObjects = tags.objects.slice(0, 6).map(s => s.toLowerCase().trim()).filter(s => s.length >= 3);
 
   // Generate candidates — early-accept multi-call by default, batch behind NV2_BATCH=1
-  const genN = isUsableFace ? 5 : 6;
+  const genN = isUsableFace ? 4 : 6;
   const useBatch = process.env.NV2_BATCH === '1';
 
   // Validate function used by early-accept path (clean + validate in one step)
@@ -4021,9 +4074,9 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
     results = rawCandidates.map(validateFn);
     valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
     rejected = results.filter(r => !r.valid);
-    earlyMeta = { earlyAccepted: false, earlyReason: 'batch', timeToFirstValid: null, timeToThirdValid: null, preTopUpValidCount: valid.length, topUpAttempted: false, topUpValidCount: 0, finalValidCount: valid.length };
+    earlyMeta = { earlyAccepted: false, earlyReason: 'batch', timeToFirstValid: null, timeToThirdValid: null, phase1InitialCalls: genN, phase1SettledCount: genN, graceWaitUsed: false, preTopUpValidCount: valid.length, boosterFired: false, boosterValidAdded: 0, topUpAttempted: false, topUpValidCount: 0, topUpMode: null, repairedCount: 0, repairedValidCount: 0, finalValidCount: valid.length };
   } else {
-    const ea = await nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n: genN, validateFn });
+    const ea = await nv2GenerateCandidatesEarlyAccept({ imageBase64, detailsBlock, n: genN, validateFn, isUsableFace });
     results = ea.results;
     valid = results.filter(r => r.valid).sort((a, b) => b.score - a.score);
     rejected = results.filter(r => !r.valid);
@@ -4031,7 +4084,13 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
   }
 
   const t1 = Date.now();
-  console.log(`[nuclear-v2] generationTime=${t1 - t0}ms candidatesRequested=${genN} candidatesParsed=${results.length} mode=${useBatch ? 'batch' : 'early-accept'} earlyAccepted=${earlyMeta.earlyAccepted} earlyReason=${earlyMeta.earlyReason} preTopUpValid=${earlyMeta.preTopUpValidCount} topUp=${earlyMeta.topUpAttempted}(+${earlyMeta.topUpValidCount}) finalValidCount=${earlyMeta.finalValidCount} t1stValid=${earlyMeta.timeToFirstValid}ms t3rdValid=${earlyMeta.timeToThirdValid}ms`);
+  console.log(`[nuclear-v2] generationTime=${t1 - t0}ms phase1InitialCalls=${earlyMeta.phase1InitialCalls ?? genN} phase1Settled=${earlyMeta.phase1SettledCount ?? '?'}/${genN} candidatesParsed=${results.length} mode=${useBatch ? 'batch' : 'early-accept'} earlyAccepted=${earlyMeta.earlyAccepted} earlyReason=${earlyMeta.earlyReason} graceWait=${earlyMeta.graceWaitUsed ?? false} preTopUpValid=${earlyMeta.preTopUpValidCount} booster=${earlyMeta.boosterFired ?? false}(+${earlyMeta.boosterValidAdded ?? 0}) topUp=${earlyMeta.topUpAttempted}(+${earlyMeta.topUpValidCount}) topUpMode=${earlyMeta.topUpMode} repairedCount=${earlyMeta.repairedCount} repairedValidCount=${earlyMeta.repairedValidCount} finalValidCount=${earlyMeta.finalValidCount} t1stValid=${earlyMeta.timeToFirstValid}ms t3rdValid=${earlyMeta.timeToThirdValid}ms`);
+
+  if (results.length === 0 && !useBatch) {
+    const settled = earlyMeta.phase1SettledCount ?? 0;
+    const reason = settled >= genN ? 'all_failed' : 'timecap_zero_results';
+    console.log(`[nuclear-v2] WARNING finalizeReason=${reason} phase1Settled=${settled}/${genN} graceWait=${earlyMeta.graceWaitUsed ?? false}`);
+  }
 
   if (isDev) {
     const rejectSummary = {};
@@ -4249,13 +4308,24 @@ async function generateNuclearV2({ clientId = 'anon', imageBase64, dynamicTarget
         validCount: typeof valid !== 'undefined' ? valid.length : null,
         rejectedReasons: typeof rejected !== 'undefined' ? rejected.map(r => r.reason) : null,
         winnerScore: typeof valid !== 'undefined' && valid.length > 0 ? valid[0].score : null,
+        generationTime: t1 - t0,
+        totalTime: t2 - t0,
+        earlyReason: earlyMeta.earlyReason,
+        preTopUpValidCount: earlyMeta.preTopUpValidCount,
+        topUpMode: earlyMeta.topUpMode,
+        repairedCount: earlyMeta.repairedCount,
+        repairedValidCount: earlyMeta.repairedValidCount,
+        finalValidCount: earlyMeta.finalValidCount,
+        phase1InitialCalls: earlyMeta.phase1InitialCalls ?? genN,
+        phase1SettledCount: earlyMeta.phase1SettledCount ?? null,
+        graceWaitUsed: earlyMeta.graceWaitUsed ?? false,
       },
     };
   }
   return {
     roast: finalRoast,
     meta: {
-      candidateCount: rawCandidates.length,
+      candidateCount: results.length,
       validCount: valid.length,
       winnerScore: valid.length > 0 ? valid[0].score : 0,
       fallbackUsed,
@@ -4765,6 +4835,623 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
   return { roast: finalRoast, meta: normalMeta };
 }
 
+// ============================================================
+// NUCLEAR-SV — Nuclear tier via local skeleton + single LLM polish
+// Goal: reduce latency by replacing multi-call vision with template gen
+// ============================================================
+
+// --- Nuclear-SV config ---
+const NSV_LOCAL_CANDIDATES = 10;
+const NSV_MAX_RECENT_STRUCTURES = 6;
+const NSV_MAX_RECENT_TARGETS = 6;
+const NSV_MICRO_TEMPLATE_RATE = 0;  // disabled for freeze
+
+// --- Nuclear-SV Structure Templates ---
+// ~40 templates across 8 reasoning families for maximum rhythm diversity.
+// Two-sentence escalation format: S1 (setup with {TARGET}, 9-12 words) + S2 (punchline with {SECOND_TARGET}, 5-9 words).
+// Singular/plural variants: [singular, plural] — selected at render time per target.
+// S2 types: correction, consequence, exposure, social reaction.
+const NSV_STRUCTURES = [
+  // ── FAMILY: EVIDENCE (proving / case-building logic) ──
+  { id: 'EV01', s1: ['The {TARGET} alone is all the evidence anyone needs.', 'The {TARGET} alone are all the evidence anyone needs.'], s2: ['The {SECOND_TARGET} just confirms the whole theory.', 'The {SECOND_TARGET} just confirm the whole theory.'] },
+  { id: 'EV02', s1: ['That {TARGET} is all the proof required to close this case.', 'Those {TARGET} are all the proof required to close this case.'], s2: ['The {SECOND_TARGET} sealed the verdict permanently.', 'The {SECOND_TARGET} sealed the verdict permanently.'] },
+  { id: 'EV03', s1: ['Your {TARGET} already submitted itself as exhibit A.', 'Your {TARGET} already submitted themselves as exhibit A.'], s2: ['The {SECOND_TARGET} filed the supporting documents.', 'The {SECOND_TARGET} filed the supporting documents.'] },
+  { id: 'EV04', s1: ['If anyone needed proof, your {TARGET} just settled it.', 'If anyone needed proof, your {TARGET} just settled it.'], s2: ['That {SECOND_TARGET} wrote the closing argument.', 'Those {SECOND_TARGET} wrote the closing argument.'] },
+  { id: 'EV05', s1: ['The {TARGET} speaks for itself and the testimony is damning.', 'The {TARGET} speak for themselves and the testimony is damning.'], s2: ['The {SECOND_TARGET} corroborated every word of it.', 'The {SECOND_TARGET} corroborated every word of it.'] },
+
+  // ── FAMILY: SOCIAL SHAME (placement / drafts / group chat logic) ──
+  { id: 'SS01', s1: ['Your {TARGET} got this photo forwarded to the group chat.', 'Your {TARGET} got this photo forwarded to the group chat.'], s2: ['The {SECOND_TARGET} made it the pinned message.', 'The {SECOND_TARGET} made it the pinned message.'] },
+  { id: 'SS02', s1: ['That {TARGET} explains why this stayed in the drafts folder.', 'Those {TARGET} explain why this stayed in the drafts folder.'], s2: ['The {SECOND_TARGET} explains why nobody asked for more.', 'The {SECOND_TARGET} explain why nobody asked for more.'] },
+  { id: 'SS03', s1: ['This whole photo belongs in the evidence folder because of that {TARGET}.', 'This whole photo belongs in the evidence folder because of those {TARGET}.'], s2: ['The {SECOND_TARGET} got it archived permanently.', 'The {SECOND_TARGET} got it archived permanently.'] },
+  { id: 'SS04', s1: ['The {TARGET} is the reason nobody shared this to their story.', 'The {TARGET} are the reason nobody shared this to their story.'], s2: ['The {SECOND_TARGET} made sure it stayed buried.', 'The {SECOND_TARGET} made sure it stayed buried.'] },
+  { id: 'SS05', s1: ['Someone screenshotted this before you could delete that {TARGET}.', 'Someone screenshotted this before you could delete those {TARGET}.'], s2: ['The {SECOND_TARGET} made it worth saving forever.', 'The {SECOND_TARGET} made it worth saving forever.'] },
+
+  // ── FAMILY: VERDICT (judgment / ruling / finality logic) ──
+  { id: 'VD01', s1: ['The verdict on your {TARGET} came back and it is devastating.', 'The verdict on your {TARGET} came back and it is devastating.'], s2: ['The {SECOND_TARGET} eliminated any chance of appeal.', 'The {SECOND_TARGET} eliminated any chance of appeal.'] },
+  { id: 'VD02', s1: ['Your {TARGET} just closed the case on this entire photo.', 'Your {TARGET} just closed the case on this entire photo.'], s2: ['That {SECOND_TARGET} delivered the final ruling.', 'Those {SECOND_TARGET} delivered the final ruling.'] },
+  { id: 'VD03', s1: ['No jury would look at that {TARGET} and rule favorably.', 'No jury would look at those {TARGET} and rule favorably.'], s2: ['The {SECOND_TARGET} would get the case thrown out.', 'The {SECOND_TARGET} would get the case thrown out.'] },
+  { id: 'VD04', s1: ['That {TARGET} already decided how this photo gets remembered.', 'Those {TARGET} already decided how this photo gets remembered.'], s2: ['The {SECOND_TARGET} made sure nobody forgets it.', 'The {SECOND_TARGET} made sure nobody forgets it.'] },
+  { id: 'VD05', s1: ['Your {TARGET} entered this photo into evidence against you.', 'Your {TARGET} entered this photo into evidence against you.'], s2: ['The {SECOND_TARGET} testified as a hostile witness.', 'The {SECOND_TARGET} testified as a hostile witness.'] },
+
+  // ── FAMILY: NARRATIVE (storytelling / scene-setting logic) ──
+  { id: 'NR01', s1: ['One look at your {TARGET} and everyone already knows the story.', 'One look at your {TARGET} and everyone already knows the story.'], s2: ['The {SECOND_TARGET} added the tragic epilogue.', 'The {SECOND_TARGET} added the tragic epilogue.'] },
+  { id: 'NR02', s1: ['The story this photo tells starts and ends with that {TARGET}.', 'The story this photo tells starts and ends with those {TARGET}.'], s2: ['The {SECOND_TARGET} wrote the worst chapter.', 'The {SECOND_TARGET} wrote the worst chapter.'] },
+  { id: 'NR03', s1: ['Somewhere between the camera and the upload your {TARGET} ruined everything.', 'Somewhere between the camera and the upload your {TARGET} ruined everything.'], s2: ['The {SECOND_TARGET} made sure there were witnesses.', 'The {SECOND_TARGET} made sure there were witnesses.'] },
+  { id: 'NR04', s1: ['There is an entire timeline that led to this {TARGET}.', 'There is an entire timeline that led to these {TARGET}.'], s2: ['The {SECOND_TARGET} proved the whole journey was pointless.', 'The {SECOND_TARGET} proved the whole journey was pointless.'] },
+  { id: 'NR05', s1: ['This photo had potential until the {TARGET} showed up uninvited.', 'This photo had potential until the {TARGET} showed up uninvited.'], s2: ['The {SECOND_TARGET} made sure it never recovered.', 'The {SECOND_TARGET} made sure it never recovered.'] },
+
+  // ── FAMILY: CONFIDENCE / SELF-OWN (doubling down / posting anyway) ──
+  { id: 'CO01', s1: ['Your {TARGET} is proof you doubled down on all of this.', 'Your {TARGET} are proof you doubled down on all of this.'], s2: ['The {SECOND_TARGET} shows you meant every bit of it.', 'The {SECOND_TARGET} show you meant every bit of it.'] },
+  { id: 'CO02', s1: ['You saw that {TARGET} in the preview and still hit post.', 'You saw those {TARGET} in the preview and still hit post.'], s2: ['The {SECOND_TARGET} confirms there was no hesitation.', 'The {SECOND_TARGET} confirm there was no hesitation.'] },
+  { id: 'CO03', s1: ['The confidence it took to post this with that {TARGET} is staggering.', 'The confidence it took to post this with those {TARGET} is staggering.'], s2: ['The {SECOND_TARGET} made it genuinely historic.', 'The {SECOND_TARGET} made it genuinely historic.'] },
+  { id: 'CO04', s1: ['That {TARGET} says you checked the mirror and chose violence anyway.', 'Those {TARGET} say you checked the mirror and chose violence anyway.'], s2: ['The {SECOND_TARGET} says you meant it personally.', 'The {SECOND_TARGET} say you meant it personally.'] },
+  { id: 'CO05', s1: ['Your {TARGET} is what happens when self-awareness takes the day off.', 'Your {TARGET} are what happens when self-awareness takes the day off.'], s2: ['The {SECOND_TARGET} clocked in to make it worse.', 'The {SECOND_TARGET} clocked in to make it worse.'] },
+
+  // ── FAMILY: OBSERVATION (noticing / pointing out / calling attention) ──
+  { id: 'OB01', s1: ['Everything about this photo collapses right at the {TARGET}.', 'Everything about this photo collapses right at the {TARGET}.'], s2: ['The {SECOND_TARGET} made the damage impossible to ignore.', 'The {SECOND_TARGET} made the damage impossible to ignore.'] },
+  { id: 'OB02', s1: ['The {TARGET} says everything nobody in the room needed confirmed.', 'The {TARGET} say everything nobody in the room needed confirmed.'], s2: ['The {SECOND_TARGET} repeated it louder for everyone.', 'The {SECOND_TARGET} repeated it louder for everyone.'] },
+  { id: 'OB03', s1: ['Nobody asked about the {TARGET} but it is doing all the talking.', 'Nobody asked about the {TARGET} but they are doing all the talking.'], s2: ['The {SECOND_TARGET} nodded along in full agreement.', 'The {SECOND_TARGET} nodded along in full agreement.'] },
+  { id: 'OB04', s1: ['The first thing anyone notices here is the {TARGET} unfortunately.', 'The first thing anyone notices here are the {TARGET} unfortunately.'], s2: ['The {SECOND_TARGET} makes it impossible to look away.', 'The {SECOND_TARGET} make it impossible to look away.'] },
+  { id: 'OB05', s1: ['Your {TARGET} is doing the heavy lifting to make this unforgettable.', 'Your {TARGET} are doing the heavy lifting to make this unforgettable.'], s2: ['The {SECOND_TARGET} volunteered for overtime.', 'The {SECOND_TARGET} volunteered for overtime.'] },
+
+  // ── FAMILY: CONTRAST (expectation vs. reality / before-after logic) ──
+  { id: 'CT01', s1: ['Your {TARGET} makes every part of this moment impossible to defend.', 'Your {TARGET} make every part of this moment impossible to defend.'], s2: ['The {SECOND_TARGET} removed the last line of defense.', 'The {SECOND_TARGET} removed the last line of defense.'] },
+  { id: 'CT02', s1: ['This could have been a decent photo but the {TARGET} intervened.', 'This could have been a decent photo but the {TARGET} intervened.'], s2: ['The {SECOND_TARGET} blocked any chance of recovery.', 'The {SECOND_TARGET} blocked any chance of recovery.'] },
+  { id: 'CT03', s1: ['The rest of the photo tried its best but that {TARGET} refused.', 'The rest of the photo tried its best but those {TARGET} refused.'], s2: ['The {SECOND_TARGET} picked the wrong side entirely.', 'The {SECOND_TARGET} picked the wrong side entirely.'] },
+  { id: 'CT04', s1: ['Without that {TARGET} this photo might have had a chance.', 'Without those {TARGET} this photo might have had a chance.'], s2: ['The {SECOND_TARGET} made absolutely certain it did not.', 'The {SECOND_TARGET} made absolutely certain it did not.'] },
+  { id: 'CT05', s1: ['Your {TARGET} turned what could have been fine into a disaster.', 'Your {TARGET} turned what could have been fine into a disaster.'], s2: ['The {SECOND_TARGET} escalated it beyond all repair.', 'The {SECOND_TARGET} escalated it beyond all repair.'] },
+
+  // ── FAMILY: PUBLIC EXPOSURE (broadcasting / permanence / receipts) ──
+  { id: 'PE01', s1: ['Your {TARGET} turned this into a permanently documented incident.', 'Your {TARGET} turned this into a permanently documented incident.'], s2: ['The {SECOND_TARGET} got it trending immediately.', 'The {SECOND_TARGET} got it trending immediately.'] },
+  { id: 'PE02', s1: ['That {TARGET} made this photo a matter of public record.', 'Those {TARGET} made this photo a matter of public record.'], s2: ['The {SECOND_TARGET} ensured it can never be deleted.', 'The {SECOND_TARGET} ensured it can never be deleted.'] },
+  { id: 'PE03', s1: ['Thanks to that {TARGET} this is now permanently searchable online.', 'Thanks to those {TARGET} this is now permanently searchable online.'], s2: ['The {SECOND_TARGET} made it the first result.', 'The {SECOND_TARGET} made it the first result.'] },
+  { id: 'PE04', s1: ['Your {TARGET} just guaranteed this photo outlives your dignity.', 'Your {TARGET} just guaranteed this photo outlives your dignity.'], s2: ['The {SECOND_TARGET} is making sure of it personally.', 'The {SECOND_TARGET} are making sure of it personally.'] },
+  { id: 'PE05', s1: ['That {TARGET} broadcast everything you were trying to keep quiet.', 'Those {TARGET} broadcast everything you were trying to keep quiet.'], s2: ['The {SECOND_TARGET} turned up the volume on it.', 'The {SECOND_TARGET} turned up the volume on it.'] },
+];
+
+// Plural target detection
+const NSV_PLURAL_TARGETS = new Set(['glasses', 'shoes', 'eyebrows', 'pants', 'jeans', 'socks']);
+function nsvIsPlural(target) {
+  return NSV_PLURAL_TARGETS.has(target) || (target.endsWith('s') && !target.endsWith('ss') && target !== 'eness');
+}
+
+const NSV_TEMPLATE_FAMILY = {
+  // Evidence
+  EV01: 'FAMILY_EVIDENCE', EV02: 'FAMILY_EVIDENCE', EV03: 'FAMILY_EVIDENCE', EV04: 'FAMILY_EVIDENCE', EV05: 'FAMILY_EVIDENCE',
+  // Social shame
+  SS01: 'FAMILY_SOCIAL',   SS02: 'FAMILY_SOCIAL',   SS03: 'FAMILY_SOCIAL',   SS04: 'FAMILY_SOCIAL',   SS05: 'FAMILY_SOCIAL',
+  // Verdict
+  VD01: 'FAMILY_VERDICT',  VD02: 'FAMILY_VERDICT',  VD03: 'FAMILY_VERDICT',  VD04: 'FAMILY_VERDICT',  VD05: 'FAMILY_VERDICT',
+  // Narrative
+  NR01: 'FAMILY_NARRATIVE', NR02: 'FAMILY_NARRATIVE', NR03: 'FAMILY_NARRATIVE', NR04: 'FAMILY_NARRATIVE', NR05: 'FAMILY_NARRATIVE',
+  // Confidence / self-own
+  CO01: 'FAMILY_CONFIDENCE', CO02: 'FAMILY_CONFIDENCE', CO03: 'FAMILY_CONFIDENCE', CO04: 'FAMILY_CONFIDENCE', CO05: 'FAMILY_CONFIDENCE',
+  // Observation
+  OB01: 'FAMILY_OBSERVATION', OB02: 'FAMILY_OBSERVATION', OB03: 'FAMILY_OBSERVATION', OB04: 'FAMILY_OBSERVATION', OB05: 'FAMILY_OBSERVATION',
+  // Contrast
+  CT01: 'FAMILY_CONTRAST', CT02: 'FAMILY_CONTRAST', CT03: 'FAMILY_CONTRAST', CT04: 'FAMILY_CONTRAST', CT05: 'FAMILY_CONTRAST',
+  // Public exposure
+  PE01: 'FAMILY_EXPOSURE', PE02: 'FAMILY_EXPOSURE', PE03: 'FAMILY_EXPOSURE', PE04: 'FAMILY_EXPOSURE', PE05: 'FAMILY_EXPOSURE',
+};
+
+// --- Nuclear-SV Slot Pools ---
+const NSV_TARGET_POOL = [
+  'hairline', 'posture', 'fit', 'smile', 'jawline', 'outfit', 'stance',
+  'angle', 'hoodie', 'expression', 'shirt', 'glasses', 'beard', 'eyebrows',
+  'crop', 'shoes', 'background', 'hat', 'hair', 'collar', 'squint',
+  'head tilt', 'jacket', 'eye contact', 'watch', 'stare', 'grin',
+];
+
+const NSV_CRITIQUE_POOL = [
+  'you pressed post anyway and meant it',
+  'you posted this on purpose for everyone to see',
+  'you let this leave the camera roll willingly',
+  'you gave this the green light without hesitation',
+  'you backed this decision publicly',
+  'you went public with this and stood by it',
+  'you hit post and never looked back',
+  'you uploaded this voluntarily and on purpose',
+  'you let this go live in front of everyone',
+  'you chose this over every other option',
+  'the front camera tried to warn you first',
+  'you really thought this was the one to post',
+  'you submitted this to the timeline on purpose',
+  'you greenlit this for the whole internet',
+  'you looked at this and still hit share',
+  'nobody asked for this but you delivered anyway',
+];
+
+const NSV_SOCIAL_FAIL_POOL = [
+  'the group chat evidence folder', 'the group chat screenshot collection',
+  'the drafts folder it should have stayed in', 'the archive nobody checks',
+  'private stories nobody ever watched', 'the evidence file on your camera roll',
+  'a story that deserved to stay unwatched', 'a profile nobody thinks about',
+  'a screenshot forwarded to the wrong chat', 'the hidden album with good reason',
+  'a draft that should have stayed permanently in drafts', 'a timeline nobody subscribed to',
+];
+
+const NSV_SOCIAL_PLACE_POOL = [
+  'your drafts folder for a reason', 'the recently deleted album',
+  'the camera roll graveyard where it belongs', 'the burner account nobody follows',
+  'the archive collecting dust', 'the hidden album nobody was meant to find',
+  'the folder specifically labeled do not post', 'the close friends list nobody added you to',
+];
+
+const NSV_SOCIAL_CONTEXT_POOL = [
+  'public service announcement', 'cautionary tale', 'group chat exhibit',
+  'case study in overconfidence', 'documented incident',
+  'living warning label', 'front-page mistake', 'timeline disaster',
+  'permanent record entry', 'social media crime scene',
+];
+
+// NSV_MICDROP_POOL removed — nuclear-sv now uses two-sentence escalation format
+
+// --- Nuclear-SV Micro Templates ---
+const NSV_MICRO_TEMPLATES = [
+  '{TARGET}. Bold. Unfortunately.',
+  'That {TARGET}. A decision. Publicly.',
+  'That {TARGET}. Confidently wrong. Forever.',
+  '{TARGET}. Committed fully. Regrettably.',
+  'The {TARGET}. Documented. Permanently.',
+  '{TARGET}. Public record. No appeal.',
+  'That {TARGET}. On purpose. Apparently.',
+  '{TARGET}. Beyond saving. Noted.',
+];
+
+// --- Nuclear-SV S2 payoff pattern families ---
+// Groups S2 phrases by their rhetorical move so we can fatigue the pattern, not just the exact string.
+// Categories: SEAL (finality), CONFIRM (agreement/proof), RUIN (destruction/collapse),
+//   SOCIAL (group/public consequence), WITNESS (testimony/observation), ESCALATE (upgrade/worsen)
+const NSV_S2_PATTERN = {
+  EV01: 'CONFIRM', EV02: 'SEAL',    EV03: 'CONFIRM', EV04: 'CONFIRM', EV05: 'CONFIRM',
+  SS01: 'SOCIAL',  SS02: 'SOCIAL',  SS03: 'SEAL',    SS04: 'RUIN',    SS05: 'SOCIAL',
+  VD01: 'SEAL',    VD02: 'SEAL',    VD03: 'RUIN',    VD04: 'SOCIAL',  VD05: 'WITNESS',
+  NR01: 'ESCALATE', NR02: 'ESCALATE', NR03: 'SOCIAL', NR04: 'CONFIRM', NR05: 'RUIN',
+  CO01: 'CONFIRM', CO02: 'CONFIRM', CO03: 'ESCALATE', CO04: 'CONFIRM', CO05: 'ESCALATE',
+  OB01: 'RUIN',    OB02: 'SOCIAL',  OB03: 'CONFIRM', OB04: 'WITNESS', OB05: 'ESCALATE',
+  CT01: 'RUIN',    CT02: 'RUIN',    CT03: 'WITNESS', CT04: 'SEAL',    CT05: 'ESCALATE',
+  PE01: 'SOCIAL',  PE02: 'SEAL',    PE03: 'SOCIAL',  PE04: 'SEAL',    PE05: 'ESCALATE',
+};
+
+// --- Per-client Nuclear-SV state ---
+const nsvClientState = new Map();
+const nsvStructureHistory = new Map();
+const nsvFamilyHistory = new Map();
+
+function getNsvClientState(clientId) {
+  if (!nsvClientState.has(clientId)) {
+    nsvClientState.set(clientId, { recentRoasts: [], recentTargets: [], recentStructures: [], recentS2Texts: [], recentS2Patterns: [] });
+  }
+  return nsvClientState.get(clientId);
+}
+
+function pushNsvClientRoast(clientId, roast, target, structureId) {
+  const st = getNsvClientState(clientId);
+  st.recentRoasts.push(roast);
+  if (st.recentRoasts.length > 20) st.recentRoasts.shift();
+  st.recentTargets.push(target);
+  if (st.recentTargets.length > NSV_MAX_RECENT_TARGETS) st.recentTargets.shift();
+  st.recentStructures.push(structureId);
+  if (st.recentStructures.length > NSV_MAX_RECENT_STRUCTURES) st.recentStructures.shift();
+  // Track S2 payoff fatigue
+  const s2pat = NSV_S2_PATTERN[structureId] || 'MISC';
+  st.recentS2Patterns.push(s2pat);
+  if (st.recentS2Patterns.length > 5) st.recentS2Patterns.shift();
+  st.recentS2Texts.push(structureId); // track template id as proxy for exact S2 text
+  if (st.recentS2Texts.length > 5) st.recentS2Texts.shift();
+}
+
+function getNsvFamilyHistory(clientId) {
+  return nsvFamilyHistory.get(clientId || 'anon') || [];
+}
+
+function pushNsvFamilyHistory(clientId, familyId) {
+  const key = clientId || 'anon';
+  const arr = nsvFamilyHistory.get(key) || [];
+  arr.push(familyId);
+  while (arr.length > 3) arr.shift();
+  nsvFamilyHistory.set(key, arr);
+}
+
+// --- Nuclear-SV skeleton generator ---
+function generateNuclearSvSkeletons(tags) {
+  const state = getNsvClientState(tags.clientId);
+  const recentFamilies = getNsvFamilyHistory(tags.clientId);
+  const structHistory = nsvStructureHistory.get(tags.clientId) || [];
+  const candidates = [];
+  const batchRecentStructures = [...state.recentStructures];
+  const batchRecentTargets = [...state.recentTargets];
+
+  // Merge tag-derived targets with static pool (prefer tag targets)
+  const tagTargets = [];
+  if (tags.selfieAttrs && tags.selfieAttrs.length > 0) {
+    tagTargets.push(...tags.selfieAttrs.filter(a => a && a.length > 1));
+  }
+  const combinedTargets = tagTargets.length > 0
+    ? [...new Set([...tagTargets, ...NSV_TARGET_POOL])]
+    : NSV_TARGET_POOL;
+
+  // Track structure counts within this batch for variety cap
+  const batchStructCounts = {};
+
+  for (let i = 0; i < NSV_LOCAL_CANDIDATES; i++) {
+    // Pick structure with avoidance + family fatigue reroll (same as savage)
+    let structure = nv2SelectWithAvoidance(
+      NSV_STRUCTURES, batchRecentStructures, NV2_MAX_SELECT_TRIES
+    );
+    let familyId = NSV_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+
+    // Structure variety safety: hard cap any single structure to 2 per batch
+    if ((batchStructCounts[structure.id] || 0) >= 2) {
+      const altStructs = NSV_STRUCTURES.filter(t => (batchStructCounts[t.id] || 0) < 2);
+      if (altStructs.length > 0) {
+        structure = nv2SelectWithAvoidance(altStructs, batchRecentStructures, NV2_MAX_SELECT_TRIES);
+        familyId = NSV_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+      }
+    }
+
+    if (recentFamilies.includes(familyId)) {
+      const altTemplates = NSV_STRUCTURES.filter(t => {
+        const fam = NSV_TEMPLATE_FAMILY[t.id] || 'FAMILY_MISC';
+        return fam !== familyId && (batchStructCounts[t.id] || 0) < 2;
+      });
+      if (altTemplates.length > 0) {
+        structure = nv2SelectWithAvoidance(
+          altTemplates, batchRecentStructures, NV2_MAX_SELECT_TRIES
+        );
+        familyId = NSV_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+      }
+    }
+    batchStructCounts[structure.id] = (batchStructCounts[structure.id] || 0) + 1;
+    batchRecentStructures.push(structure.id);
+    if (batchRecentStructures.length > NSV_MAX_RECENT_STRUCTURES) batchRecentStructures.shift();
+
+    const target = nv2SelectWithAvoidance(
+      combinedTargets, batchRecentTargets, NV2_MAX_SELECT_TRIES
+    );
+    batchRecentTargets.push(typeof target === 'object' ? target.id : target);
+    if (batchRecentTargets.length > NSV_MAX_RECENT_TARGETS) batchRecentTargets.shift();
+
+    // Pick SECOND_TARGET: must differ from TARGET
+    let secondTarget = nv2SelectWithAvoidance(
+      combinedTargets, [target, ...batchRecentTargets], NV2_MAX_SELECT_TRIES
+    );
+    // Fallback: if same as target, try once more
+    if (secondTarget === target) {
+      const altTargets = combinedTargets.filter(t => t !== target);
+      if (altTargets.length > 0) secondTarget = altTargets[Math.floor(Math.random() * altTargets.length)];
+    }
+
+    // Select singular or plural template variant for each target
+    const isPlural = nsvIsPlural(typeof target === 'string' ? target : '');
+    const isPlural2 = nsvIsPlural(typeof secondTarget === 'string' ? secondTarget : '');
+    const s1Str = Array.isArray(structure.s1) ? structure.s1[isPlural ? 1 : 0] : structure.s1;
+    const s2Str = Array.isArray(structure.s2) ? structure.s2[isPlural2 ? 1 : 0] : structure.s2;
+
+    const s1Filled = s1Str.replace('{TARGET}', target);
+    const s2Filled = s2Str.replace('{SECOND_TARGET}', secondTarget);
+    const skeleton = s1Filled + ' ' + s2Filled;
+
+    const wc = skeleton.split(/\s+/).length;
+
+    // Scoring (nuclear-sv two-sentence escalation: prefer 16–20 total words)
+    let wcScore = 0;
+    const scoreBreakdown = [];
+    if (wc >= 16 && wc <= 20) { wcScore += 14; scoreBreakdown.push('wcSweet+14'); }
+    if (wc >= 17 && wc <= 19) { wcScore += 6; scoreBreakdown.push('wcIdeal+6'); }
+    if (wc >= 21 && wc <= 22) { wcScore += 4; scoreBreakdown.push('wcOk+4'); }
+    if (wc <= 13) { wcScore -= 8; scoreBreakdown.push('wcShort-8'); }
+    if (wc >= 14 && wc <= 15) { wcScore -= 3; scoreBreakdown.push('wcBorder-3'); }
+    if (wc > 24) { wcScore -= 12; scoreBreakdown.push('wcLong-12'); }
+
+    // Structure fatigue: base penalty if used recently
+    if (structHistory.includes(structure.id)) { wcScore -= 8; scoreBreakdown.push('structFatigue-8'); }
+
+    // Consecutive repeat penalty: if last 2 winners used the same structure
+    if (structHistory.length >= 2 && structHistory.slice(-2).every(s => s === structure.id)) {
+      wcScore -= 18; scoreBreakdown.push('consecutiveRepeat-18');
+    }
+
+    // Family fatigue: penalize same family as last winner
+    const lastFamily = recentFamilies.length > 0 ? recentFamilies[recentFamilies.length - 1] : null;
+    if (lastFamily && lastFamily === familyId) {
+      wcScore -= 6; scoreBreakdown.push('familyFatigue-6');
+    }
+
+    // Family fatigue: penalize if same family appears in 2 of last 3 winners
+    if (recentFamilies.filter(f => f === familyId).length >= 2) {
+      wcScore -= 10; scoreBreakdown.push('familySaturate-10');
+    }
+
+    // Target fatigue: base penalty
+    if (state.recentTargets.includes(target)) { wcScore -= 8; scoreBreakdown.push('targetFatigue-8'); }
+
+    // Target fatigue hardening: last 2 winners used same target
+    const targetHist = state.recentTargets;
+    if (targetHist.length >= 2 && targetHist.slice(-2).every(t => t === target)) {
+      wcScore -= 10; scoreBreakdown.push('targetRepeat-10');
+    }
+
+    // Target fatigue hardening: 3+ uses in last 5 winners
+    if (targetHist.length >= 3 && targetHist.slice(-5).filter(t => t === target).length >= 3) {
+      wcScore -= 18; scoreBreakdown.push('targetSticky-18');
+    }
+
+    // --- Nuclear harshness biases ---
+    const fullLower = skeleton.toLowerCase();
+
+    // 1) Social-exposure framing anywhere: +14
+    const NSV_SOCIAL_EXPOSURE_RE = /\b(group chat|drafts|archive|private stories|evidence folder|screenshot|screenshotted|hidden album|camera roll|timeline|burner account|close friends)\b/i;
+    if (NSV_SOCIAL_EXPOSURE_RE.test(fullLower)) { wcScore += 14; scoreBreakdown.push('socialExposure+14'); }
+
+    // 2) Public-consequence critique language: +6
+    const NSV_CRITIQUE_EXPOSURE_RE = /\b(pressed post|posted this|hit post|uploaded|went public|backed this publicly|greenlit this in public|leave the camera roll|submitted this to the timeline)\b/i;
+    if (NSV_CRITIQUE_EXPOSURE_RE.test(fullLower)) { wcScore += 6; scoreBreakdown.push('critiqueExposure+6'); }
+
+    // 3) Irreversible / public exposure language anywhere: +8
+    const NSV_IRREVERSIBLE_RE = /\b(public|forever|documented|record|archive|permanent|permanently|screenshotted|receipts|verdict|evidence)\b/i;
+    if (NSV_IRREVERSIBLE_RE.test(fullLower)) { wcScore += 8; scoreBreakdown.push('irreversible+8'); }
+
+    // 4) S2 escalation quality: reward aggressive escalation language: +10
+    const s2Lower = s2Filled.toLowerCase();
+    const NSV_ESCALATION_RE = /\b(sealed|confirmed|eliminated|delivered|testified|catastrophe|ruined|permanently|trending|never be deleted|first result|hostile witness|closing argument|blocked|escalated|beyond.+repair|impossible to ignore|made absolutely certain)\b/i;
+    if (NSV_ESCALATION_RE.test(s2Lower)) { wcScore += 10; scoreBreakdown.push('s2Escalation+10'); }
+
+    // 5) Anchor-and-payoff bonus: reward S2 that pays off S1's setup (+8)
+    // S1 sets up with attempt/observation language, S2 lands with reversal/consequence language
+    const s1Lower = s1Filled.toLowerCase();
+    const S1_SETUP_RE = /\b(tried|looked|felt|suggested|almost|thought|could have|had potential|had a chance|started to|attempted)\b/;
+    const S2_PAYOFF_RE = /\b(ruined|proved|made sure|confirmed|finished|killed|exposed|noticed|sealed|eliminated|ended|destroyed|buried|ensured|upgraded|sided with|backed up|brought.+down|blocked|escalated|picked the wrong|nodded along|made.+certain)\b/;
+    const s1HasSetup = S1_SETUP_RE.test(s1Lower);
+    const s2HasPayoff = S2_PAYOFF_RE.test(s2Lower);
+    if (s1HasSetup && s2HasPayoff) {
+      wcScore += 8; scoreBreakdown.push('anchorPayoff+8');
+    }
+
+    // 6) S2 payoff-phrase fatigue: penalize repeated S2 patterns
+    const s2PatternId = NSV_S2_PATTERN[structure.id] || 'MISC';
+    // Exact S2 template recently used: -10
+    if (state.recentS2Texts && state.recentS2Texts.includes(structure.id)) {
+      wcScore -= 10; scoreBreakdown.push('s2ExactFatigue-10');
+    }
+    // Same S2 pattern family recently: -6
+    if (state.recentS2Patterns && state.recentS2Patterns.includes(s2PatternId)) {
+      wcScore -= 6; scoreBreakdown.push('s2PatternFatigue-6');
+    }
+
+    candidates.push({ structure, familyId, target, secondTarget, skeleton, wcScore, wordCount: wc, scoreBreakdown });
+  }
+
+  return candidates;
+}
+
+// --- Main Nuclear-SV generator ---
+async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTargets = [], selfieTags = null }) {
+  const isDev = process.env.NODE_ENV !== 'production';
+  const t0 = Date.now();
+  let fallbackUsed = false;
+  let pickedStructure = null;
+  let pickedTarget = null;
+  let finalRoast = null;
+  let wordCount = 0;
+  let skeletonsGenerated = 0;
+
+  // Build selfie attrs list from tags (if available)
+  const selfieAttrs = [];
+  if (selfieTags && typeof selfieTags === 'object') {
+    if (selfieTags.hair && selfieTags.hair !== 'unknown') selfieAttrs.push(selfieTags.hair);
+    if (selfieTags.outfit && selfieTags.outfit !== 'unknown') selfieAttrs.push(selfieTags.outfit);
+    if (selfieTags.expression && selfieTags.expression !== 'unknown') selfieAttrs.push(selfieTags.expression);
+    if (selfieTags.grooming && selfieTags.grooming !== 'unknown') selfieAttrs.push(selfieTags.grooming);
+    if (selfieTags.pose && selfieTags.pose !== 'unknown') selfieAttrs.push(selfieTags.pose);
+    if (Array.isArray(selfieTags.objects)) selfieAttrs.push(...selfieTags.objects);
+  }
+
+  // 0. Micro-template fast path (10% chance)
+  const useMicro = Math.random() < NSV_MICRO_TEMPLATE_RATE;
+  if (useMicro) {
+    const state = getNsvClientState(clientId);
+    const microTarget = nv2SelectWithAvoidance(
+      NSV_TARGET_POOL, state.recentTargets, NV2_MAX_SELECT_TRIES
+    );
+    const capTarget = microTarget.charAt(0).toUpperCase() + microTarget.slice(1);
+    let microTpl = NSV_MICRO_TEMPLATES[Math.floor(Math.random() * NSV_MICRO_TEMPLATES.length)];
+    let microResult = microTpl.replace(/\{TARGET\}/g, capTarget);
+    let microWc = microResult.split(/\s+/).length;
+
+    // Reroll once if too short
+    if (microWc < 6) {
+      microTpl = NSV_MICRO_TEMPLATES[Math.floor(Math.random() * NSV_MICRO_TEMPLATES.length)];
+      microResult = microTpl.replace(/\{TARGET\}/g, capTarget);
+      microWc = microResult.split(/\s+/).length;
+    }
+
+    if (microWc >= 6 && !nv2HasBannedPatterns(microResult) && isPlaySafe(microResult)) {
+      pickedStructure = { id: 'MICRO' };
+      pickedTarget = microTarget;
+      finalRoast = microResult;
+      wordCount = microWc;
+
+      pushNsvClientRoast(clientId, finalRoast, pickedTarget, 'MICRO');
+      pushNsvFamilyHistory(clientId, 'FAMILY_MISC');
+
+      const t2 = Date.now();
+      console.log(`[nuclear-sv] micro clientId=${clientId} target="${pickedTarget}" words=${wordCount}`);
+      console.log(`[nuclear-sv] result="${finalRoast}"`);
+      console.log(`[nuclear-sv] totalTime=${t2 - t0}ms`);
+
+      return {
+        roast: finalRoast,
+        meta: {
+          mode: 'nuclear-sv',
+          tier: 'nuclear',
+          useMicro: true,
+          structureId: 'MICRO',
+          familyId: 'FAMILY_MISC',
+          target: pickedTarget,
+          wordCount,
+          skeletonsGenerated: 0,
+          skeletonScoreTop: null,
+          fallbackUsed: false,
+          clientId,
+          totalTime: t2 - t0,
+        },
+      };
+    } else {
+      if (isDev) console.log(`[nuclear-sv] micro failed validation, falling through to candidates`);
+    }
+  }
+
+  // 1. Generate skeletons locally
+  const candidates = generateNuclearSvSkeletons({ clientId, selfieAttrs });
+  skeletonsGenerated = candidates.length;
+
+  // 2. Sort: highest wcScore, tie-break by sweet-spot word count (14–18 preferred)
+  candidates.sort((a, b) => {
+    if (b.wcScore !== a.wcScore) return b.wcScore - a.wcScore;
+    const aSweet = (a.wordCount >= 15 && a.wordCount <= 17) ? 1 : 0;
+    const bSweet = (b.wordCount >= 15 && b.wordCount <= 17) ? 1 : 0;
+    if (bSweet !== aSweet) return bSweet - aSweet;
+    const aGood = (a.wordCount >= 14 && a.wordCount <= 18) ? 1 : 0;
+    const bGood = (b.wordCount >= 14 && b.wordCount <= 18) ? 1 : 0;
+    return bGood - aGood;
+  });
+
+  const skeletonScoreTop = candidates.length > 0 ? candidates[0].wcScore : 0;
+
+  if (isDev) {
+    const top3 = candidates.slice(0, 3).map((c, i) => `#${i + 1} tmpl=${c.structure.id} fam=${c.familyId} wc=${c.wordCount} score=${c.wcScore} [${(c.scoreBreakdown || []).join(',')}]`);
+    console.log(`[nuclear-sv] skeletons=${skeletonsGenerated} top3: ${top3.join(' | ')}`);
+  }
+
+  // 3. Polish via single LLM call — try best, then 2nd-best
+  async function nsvPolishAndValidate(candidate) {
+    let polished = candidate.skeleton;
+    if (!process.env.TUNING_MODE) {
+      const polishPrompt = `Polish this two-sentence escalation roast so it sounds natural and sharp.\n\nRules:\n- Exactly 2 sentences\n- 14–22 words total preferred\n- Sentence 1: setup/observation about the subject (~9-12 words)\n- Sentence 2: escalation/punchline that hits harder (~5-9 words)\n- Keep the same meaning, both targets, and structure\n\nRoast:\n"${candidate.skeleton}"`;
+      try {
+        const polishResp = await openai.responses.create({
+          model: 'gpt-4o',
+          input: [
+            { role: 'system', content: 'You are a ruthless roast polisher. Output ONLY the polished roast. No quotes, no explanation, no markdown. Exactly 2 sentences. Sentence 1 is the setup. Sentence 2 escalates and hits harder. 14–22 words total. Cold, sharp, nuclear.' },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: polishPrompt },
+                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+              ],
+            },
+          ],
+          max_output_tokens: 80,
+          temperature: 0.85,
+          top_p: 0.9,
+        });
+        if (polishResp.output_text) polished = polishResp.output_text;
+      } catch (err) {
+        if (isDev) console.log(`[nuclear-sv] polish LLM error: ${err.message}`);
+      }
+    }
+
+    // Clean + validate using nuclear cleaning pipeline
+    let result = nv2SanitizeQuotes(nv2CleanOutput(polished));
+
+    // Nuclear-SV validation: 2 sentences, 14-24 words, S2 4-10 words, target in S1
+    if (!result || !result.trim()) return null;
+    const sents = result.match(/[^.!?]*[.!?]+/g);
+    if (!sents || sents.length !== 2) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: sentenceCount=${sents ? sents.length : 0} text="${result}"`);
+      return null;
+    }
+    const wc = result.split(/\s+/).length;
+    if (wc < 14 || wc > 24) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: wordCount=${wc} text="${result}"`);
+      return null;
+    }
+    const s1 = sents[0].trim();
+    if (!s1.toLowerCase().includes(candidate.target.toLowerCase())) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: noTargetInS1 target="${candidate.target}" s1="${s1}"`);
+      return null;
+    }
+    const s2 = sents[1].trim();
+    const s2Wc = s2.replace(/[.!?]+$/, '').trim().split(/\s+/).length;
+    if (s2Wc < 4 || s2Wc > 10) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: s2Length=${s2Wc} s2="${s2}"`);
+      return null;
+    }
+    if (!isPlaySafe(result)) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: safety text="${result}"`);
+      return null;
+    }
+    if (nv2HasBannedPatterns(result)) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: bannedPattern text="${result}"`);
+      return null;
+    }
+
+    return result;
+  }
+
+  // Try best candidate
+  const best = candidates[0];
+  finalRoast = await nsvPolishAndValidate(best);
+  if (finalRoast) {
+    pickedStructure = best.structure;
+    pickedTarget = best.target;
+    wordCount = finalRoast.split(/\s+/).length;
+  }
+
+  // Fallback: try 2nd-best candidate
+  if (!finalRoast && candidates.length > 1) {
+    const second = candidates[1];
+    if (isDev) console.log(`[nuclear-sv] best failed, trying 2nd: tmpl=${second.structure.id}`);
+    finalRoast = await nsvPolishAndValidate(second);
+    if (finalRoast) {
+      pickedStructure = second.structure;
+      pickedTarget = second.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
+  }
+
+  // Safe fallback (reuse existing nuclear safe fallbacks)
+  if (!finalRoast) {
+    fallbackUsed = true;
+    finalRoast = NV2_SAFE_FALLBACKS[Math.floor(Math.random() * NV2_SAFE_FALLBACKS.length)];
+    wordCount = finalRoast.split(/\s+/).length;
+    pickedStructure = { id: 'FALLBACK' };
+    pickedTarget = 'fallback';
+    if (isDev) console.log('[nuclear-sv] all candidates failed, using safeFallback');
+  }
+
+  const t2 = Date.now();
+
+  // Update client state
+  pushNsvClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id);
+  const prevHistory = nsvStructureHistory.get(clientId) || [];
+  nsvStructureHistory.set(clientId, [pickedStructure.id, ...prevHistory].slice(0, 3));
+  pushNsvFamilyHistory(clientId, NSV_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC');
+
+  console.log(`[nuclear-sv] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" fallback=${fallbackUsed} words=${wordCount}`);
+  console.log(`[nuclear-sv] result="${finalRoast}"`);
+  console.log(`[nuclear-sv] skeletonsGenerated=${skeletonsGenerated} skeletonScoreTop=${skeletonScoreTop} totalTime=${t2 - t0}ms`);
+
+  return {
+    roast: finalRoast,
+    meta: {
+      mode: 'nuclear-sv',
+      tier: 'nuclear',
+      useMicro: false,
+      structureId: pickedStructure.id,
+      familyId: NSV_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC',
+      target: pickedTarget,
+      wordCount,
+      skeletonsGenerated,
+      skeletonScoreTop,
+      fallbackUsed,
+      clientId,
+      totalTime: t2 - t0,
+    },
+  };
+}
+
 // --- Medium V2: single-winner candidate pipeline ---
 async function generateMediumV2({ imageBase64 }) {
   const isDev = process.env.NODE_ENV !== 'production';
@@ -5236,6 +5923,32 @@ app.post('/api/roast', async (req, res) => {
     let roasts = [];
     let themes = [];
     const levelFallbacks = FALLBACKS[tierName] || FALLBACKS.medium;
+
+    // --- Nuclear-SV intercept: local skeleton + single LLM polish (NUCLEAR_ENGINE=sv) ---
+    if (tierName === 'nuclear' && process.env.NUCLEAR_ENGINE === 'sv') {
+      const nsvClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
+      if (isDev) console.log(`[nuclear-sv] clientId=${nsvClientId}`);
+
+      // Extract selfie tags (reuse client-provided or extract)
+      let nsvSelfieTags = null;
+      if (safeTags && typeof safeTags === 'object' && !Array.isArray(safeTags)) {
+        nsvSelfieTags = safeTags;
+      } else {
+        nsvSelfieTags = await extractSafeSelfieTags(imageBase64);
+      }
+
+      const { roast, meta } = await generateNuclearSv({ clientId: nsvClientId, imageBase64, selfieTags: nsvSelfieTags });
+      roasts = [roast];
+      themes = [];
+      if (isDev) {
+        console.log(`[nuclear-sv] served clientId=${meta.clientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} skeletonsGenerated=${meta.skeletonsGenerated} skeletonScoreTop=${meta.skeletonScoreTop} totalTime=${meta.totalTime}ms`);
+      }
+      roasts = roasts.slice(0, config.count);
+      if (isDev) {
+        console.log(`[roast] level=${tierName} mode=nuclear-sv returned=${roasts.length} chars=${roasts[0]?.length || 0}`);
+      }
+      return res.json({ roasts, meta: { mode: 'nuclear-sv' } });
+    }
 
     // --- Nuclear V2 intercept: use hybrid skeleton+polish system ---
     if (tierName === 'nuclear') {
@@ -5885,4 +6598,4 @@ if (!process.env.TUNING_MODE) {
   });
 }
 
-export { generateNuclearV2, generateSavageV2, nv2ExtractSceneNouns, extractSafeSelfieTags };
+export { generateNuclearV2, generateSavageV2, generateNuclearSv, nv2ExtractSceneNouns, extractSafeSelfieTags };

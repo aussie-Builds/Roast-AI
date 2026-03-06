@@ -9,9 +9,11 @@ console.log('[tune] OPENAI_API_KEY present=', !!process.env.OPENAI_API_KEY, 'len
  * Dev-only tool for measuring roast scoring behavior.
  *
  * Usage:
- *   npm run tune:nuclear          (default, Nuclear tier)
- *   npm run tune:savage           (Savage tier)
+ *   npm run tune:nuclear                    (default, Nuclear tier, v2 engine)
+ *   npm run tune:savage                     (Savage tier)
  *   node tools/tune_nuclear.js --tier savage
+ *   node tools/tune_nuclear.js --engine=sv  (Nuclear-SV engine)
+ *   node tools/tune_nuclear.js --engine=v2  (Nuclear-V2 engine, default)
  *
  * Requires: images in ./tuning_images/
  */
@@ -28,6 +30,18 @@ const { pathToFileURL } = require('node:url');
 
 const tierArg = process.argv.find((a, i) => i > 0 && process.argv[i - 1] === '--tier') || 'nuclear';
 const tier = ['nuclear', 'savage'].includes(tierArg) ? tierArg : 'nuclear';
+
+// --engine=sv | --engine=v2  (only applies when tier=nuclear)
+const engineMatch = process.argv.find(a => /^--engine=/.test(a));
+const engine = engineMatch ? engineMatch.split('=')[1] : 'v2';
+if (tier === 'nuclear' && !['v2', 'sv'].includes(engine)) {
+  console.error(`[tune] Unknown engine "${engine}". Use --engine=v2 or --engine=sv`);
+  process.exit(1);
+}
+
+// --limit=N  (cap number of images to process)
+const limitMatch = process.argv.find(a => /^--limit=/.test(a));
+const imageLimit = limitMatch ? parseInt(limitMatch.split('=')[1], 10) : Infinity;
 
 // ---------- Measurement regexes (local copies — stats only, do NOT alter scoring) ----------
 
@@ -158,18 +172,20 @@ async function main() {
 
   const files = (await fsp.readdir(tuningDir))
     .filter(f => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
-    .sort();
+    .sort()
+    .slice(0, imageLimit);
 
   if (files.length === 0) {
     console.log('No images found in ./tuning_images/. Add images to begin tuning.');
     return;
   }
 
-  console.log(`Found ${files.length} image(s) in ./tuning_images/ [tier=${tier}]\n`);
+  const engineLabel = tier === 'nuclear' ? ` engine=${engine}` : '';
+  console.log(`Found ${files.length} image(s) in ./tuning_images/ [tier=${tier}${engineLabel}]\n`);
 
   // Import server module (ESM) — TUNING_MODE prevents app.listen
   const serverPath = pathToFileURL(path.resolve('server/index.js')).href;
-  const { generateNuclearV2, generateSavageV2, nv2ExtractSceneNouns, extractSafeSelfieTags } = await import(serverPath);
+  const { generateNuclearV2, generateSavageV2, generateNuclearSv, nv2ExtractSceneNouns, extractSafeSelfieTags } = await import(serverPath);
 
   const allResults = [];
 
@@ -194,29 +210,49 @@ async function main() {
 
     console.log(`--- ${file} ---`);
 
-    // Extract tags once per image
-    const [dynamicTargets, selfieTags] = await Promise.all([
-      nv2ExtractSceneNouns(imageDataUrl),
-      extractSafeSelfieTags(imageDataUrl),
-    ]);
-    console.log('[tune] selfieTags summary', {
-      person_present: selfieTags?.person_present,
-      face_visible: selfieTags?.face_visible,
-      face_confidence: selfieTags?.face_confidence,
-      lighting: selfieTags?.lighting,
-      setting: selfieTags?.setting
-    });
+    // Extract tags once per image (nuclear-sv only needs selfieTags; nuclear-v2 needs both)
+    let dynamicTargets = [];
+    let selfieTags = null;
+    if (tier === 'nuclear' && engine === 'sv') {
+      selfieTags = await extractSafeSelfieTags(imageDataUrl);
+      console.log('[tune] engine=nuclear-sv selfieTags summary', {
+        person_present: selfieTags?.person_present,
+        face_visible: selfieTags?.face_visible,
+        face_confidence: selfieTags?.face_confidence,
+        lighting: selfieTags?.lighting,
+        setting: selfieTags?.setting
+      });
+    } else if (tier === 'nuclear') {
+      [dynamicTargets, selfieTags] = await Promise.all([
+        nv2ExtractSceneNouns(imageDataUrl),
+        extractSafeSelfieTags(imageDataUrl),
+      ]);
+      console.log('[tune] engine=nuclear-v2 selfieTags summary', {
+        person_present: selfieTags?.person_present,
+        face_visible: selfieTags?.face_visible,
+        face_confidence: selfieTags?.face_confidence,
+        lighting: selfieTags?.lighting,
+        setting: selfieTags?.setting
+      });
+    }
 
     const imageResults = [];
 
     for (let i = 0; i < RUNS_PER_IMAGE; i++) {
-      process.stdout.write(`  Run ${i + 1}/${RUNS_PER_IMAGE} ... `);
+      const engineTag = tier === 'nuclear' ? `nuclear-${engine}` : 'savage-v2';
+      process.stdout.write(`  Run ${i + 1}/${RUNS_PER_IMAGE} [${engineTag}] ... `);
 
       let result;
       if (tier === 'savage') {
         result = await generateSavageV2({
           clientId: 'tuning',
           imageBase64: imageDataUrl,
+        });
+      } else if (engine === 'sv') {
+        result = await generateNuclearSv({
+          clientId: 'tuning',
+          imageBase64: imageDataUrl,
+          selfieTags,
         });
       } else {
         result = await generateNuclearV2({
@@ -229,15 +265,42 @@ async function main() {
       const roast = result.roast;
       const meta = result.meta || null;
       if (meta) {
-        console.log(`[${meta.tier}-v2 meta]`, {
-          isUsableFace: meta.isUsableFace,
-          detailPackWeak: meta.detailPackWeak,
-          anchorsCount: meta.anchorsCount,
-          candidatesCount: meta.candidatesCount,
-          validCount: meta.validCount,
-          rejectedReasons: meta.rejectedReasons,
-          winnerScore: meta.winnerScore,
-        });
+        if (meta.mode === 'nuclear-sv') {
+          // Nuclear-SV meta
+          console.log(`[nuclear-sv meta]`, {
+            structureId: meta.structureId,
+            familyId: meta.familyId,
+            target: meta.target,
+            useMicro: meta.useMicro,
+            skeletonsGenerated: meta.skeletonsGenerated,
+            skeletonScoreTop: meta.skeletonScoreTop,
+            wordCount: meta.wordCount,
+            fallbackUsed: meta.fallbackUsed,
+            totalTime: meta.totalTime != null ? `${meta.totalTime}ms` : null,
+          });
+        } else {
+          // Nuclear-V2 or Savage meta
+          console.log(`[${meta.tier}-v2 meta]`, {
+            isUsableFace: meta.isUsableFace,
+            detailPackWeak: meta.detailPackWeak,
+            anchorsCount: meta.anchorsCount,
+            candidatesCount: meta.candidatesCount,
+            validCount: meta.validCount,
+            rejectedReasons: meta.rejectedReasons,
+            winnerScore: meta.winnerScore,
+            ...(meta.tier === 'nuclear' ? {
+              generationTime: meta.generationTime != null ? `${meta.generationTime}ms` : null,
+              totalTime: meta.totalTime != null ? `${meta.totalTime}ms` : null,
+              earlyReason: meta.earlyReason,
+              preTopUpValidCount: meta.preTopUpValidCount,
+              topUpMode: meta.topUpMode,
+              repairedCount: meta.repairedCount,
+              repairedValidCount: meta.repairedValidCount,
+              finalValidCount: meta.finalValidCount,
+              phase1InitialCalls: meta.phase1InitialCalls,
+            } : {}),
+          });
+        }
       }
 
       const entry = {
@@ -266,12 +329,13 @@ async function main() {
   const total = allEntries.length;
   const allTexts = allEntries.map(e => e.text);
 
-  const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+  const tierLabel = tier === 'nuclear' ? `Nuclear (${engine === 'sv' ? 'nuclear-sv' : 'nuclear-v2'})` : 'Savage';
 
   console.log('\n==========================');
   console.log(`${tierLabel} Tuning Summary`);
   console.log('==========================\n');
 
+  console.log(`Engine: ${tier === 'nuclear' ? `nuclear-${engine}` : 'savage-v2'}`);
   console.log(`Images tested: ${allResults.length}`);
   console.log(`Total runs: ${total}\n`);
 
@@ -280,6 +344,63 @@ async function main() {
     console.log(`lightingLeadRate: ${rate(allEntries, e => e.lightingLeads).toFixed(2)}`);
     console.log(`socialExposureRate: ${rate(allEntries, e => e.socialExposure).toFixed(2)}`);
     console.log(`clicheRate: ${rate(allEntries, e => e.cliche).toFixed(2)}`);
+
+    if (engine === 'sv') {
+      // Nuclear-SV specific aggregate stats
+      const nsvMetas = allEntries.filter(e => e.meta && e.meta.mode === 'nuclear-sv');
+      const fallbackCount = nsvMetas.filter(e => e.meta.fallbackUsed).length;
+      const microCount = nsvMetas.filter(e => e.meta.useMicro).length;
+      const timings = nsvMetas.map(e => e.meta.totalTime).filter(t => t != null);
+      const avgTime = timings.length > 0 ? (timings.reduce((s, t) => s + t, 0) / timings.length) : 0;
+
+      console.log(`avgGenerationTime: ${avgTime.toFixed(0)}ms`);
+      console.log(`fallbackCount: ${fallbackCount}/${total}`);
+      console.log(`microHitCount: ${microCount}/${total}`);
+
+      // Skeleton score distribution
+      const scores = nsvMetas.map(e => e.meta.skeletonScoreTop).filter(s => s != null);
+      if (scores.length > 0) {
+        const avgScore = scores.reduce((s, v) => s + v, 0) / scores.length;
+        console.log(`avgSkeletonScoreTop: ${avgScore.toFixed(1)}`);
+      }
+
+      // Structure distribution
+      const structCounts = {};
+      for (const e of nsvMetas) {
+        const sid = e.meta.structureId || 'UNKNOWN';
+        structCounts[sid] = (structCounts[sid] || 0) + 1;
+      }
+      const structSorted = Object.entries(structCounts).sort((a, b) => b[1] - a[1]);
+      console.log(`\n--- Structure Distribution (top 10) ---`);
+      for (const [sid, cnt] of structSorted.slice(0, 10)) {
+        const pct = ((cnt / nsvMetas.length) * 100).toFixed(1);
+        const warn = parseFloat(pct) > 30 ? ' ⚠ DOMINANT' : '';
+        console.log(`  ${sid}: ${cnt} (${pct}%)${warn}`);
+      }
+
+      // Family distribution
+      const famCounts = {};
+      for (const e of nsvMetas) {
+        const fam = e.meta.familyId || 'UNKNOWN';
+        famCounts[fam] = (famCounts[fam] || 0) + 1;
+      }
+      console.log(`\n--- Family Distribution ---`);
+      for (const [fam, cnt] of Object.entries(famCounts).sort((a, b) => b[1] - a[1])) {
+        console.log(`  ${fam}: ${cnt} (${((cnt / nsvMetas.length) * 100).toFixed(1)}%)`);
+      }
+
+      // Target distribution
+      const targetCounts = {};
+      for (const e of nsvMetas) {
+        const tgt = e.meta.target || 'unknown';
+        targetCounts[tgt] = (targetCounts[tgt] || 0) + 1;
+      }
+      const targetSorted = Object.entries(targetCounts).sort((a, b) => b[1] - a[1]);
+      console.log(`\n--- Target Distribution (top 10) ---`);
+      for (const [tgt, cnt] of targetSorted.slice(0, 10)) {
+        console.log(`  "${tgt}": ${cnt} (${((cnt / nsvMetas.length) * 100).toFixed(1)}%)`);
+      }
+    }
   }
   if (tier === 'savage') {
     const MICRO_TEXT_RE = /mid with confidence|confidence without clearance|delete this|in public\?|in public\./i;
@@ -321,12 +442,12 @@ async function main() {
       const worst = ascending.find(r => r.text && !NV2_FALLBACK_RE.test(r.text)) || ascending[0];
       console.log(`  worst: "${worst.text}" (score=${worst.score} words=${worst.words})`);
 
-      const famCounts = { YOUR: 0, THAT: 0, THE: 0, NOBODY: 0, EVEN: 0, MISC: 0 };
-      for (const r of scored) {
-        const key = r.family.replace('FAMILY_', '');
+      const famCounts = {};
+      for (const r of results) {
+        const key = (r.meta && r.meta.familyId) ? r.meta.familyId.replace('FAMILY_', '') : savageOpenerFamily(r.text).replace('FAMILY_', '');
         famCounts[key] = (famCounts[key] || 0) + 1;
       }
-      const famStr = Object.entries(famCounts).map(([k, v]) => `${k}=${v}`).join(' ');
+      const famStr = Object.entries(famCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(' ');
       console.log(`  families: ${famStr}`);
     }
     console.log(`  duplicateRate: ${dupRate(texts).toFixed(2)}`);
