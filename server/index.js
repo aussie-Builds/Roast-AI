@@ -4846,6 +4846,47 @@ const NSV_MAX_RECENT_STRUCTURES = 6;
 const NSV_MAX_RECENT_TARGETS = 6;
 const NSV_MICRO_TEMPLATE_RATE = 0;  // disabled for freeze
 
+// --- Nuclear-SV banned phrases (narration/legal tone filter) ---
+const NSV_BANNED_PHRASES = [
+  "there is an entire timeline that led to",
+  "entire timeline",
+  "the whole journey was pointless",
+  "whole journey",
+  "proved the whole",
+  "all the proof required to close this case",
+  "close this case",
+  "sealed the verdict permanently",
+  "sealed the verdict",
+  "the verdict on",
+  "came back and it is devastating",
+  "eliminated any chance of appeal",
+  "any chance of appeal",
+  "confirmed the whole case",
+  "confirms the whole theory",
+  "confirms there was no hesitation",
+];
+
+function nsvHasBannedPhrases(text = '') {
+  const t = String(text).toLowerCase();
+  return NSV_BANNED_PHRASES.some(p => t.includes(p));
+}
+
+// --- Nuclear-SV soft narration/legal token penalty ---
+const NSV_SOFT_BAD_TOKENS = [
+  "timeline", "journey", "theory", "verdict", "appeal",
+  "proof", "case", "confirmed", "confirms", "proved",
+  "explains", "required", "hesitation", "devastating",
+];
+
+function nsvNarrationPenalty(text = '') {
+  const t = String(text).toLowerCase();
+  let penalty = 0;
+  for (const tok of NSV_SOFT_BAD_TOKENS) {
+    if (t.includes(tok)) penalty += 3;
+  }
+  return Math.min(penalty, 12);
+}
+
 // --- Nuclear-SV Structure Templates ---
 // ~40 templates across 8 reasoning families for maximum rhythm diversity.
 // Two-sentence escalation format: S1 (setup with {TARGET}, 9-12 words) + S2 (punchline with {SECOND_TARGET}, 5-9 words).
@@ -4853,11 +4894,11 @@ const NSV_MICRO_TEMPLATE_RATE = 0;  // disabled for freeze
 // S2 types: correction, consequence, exposure, social reaction.
 const NSV_STRUCTURES = [
   // ── FAMILY: EVIDENCE (proving / case-building logic) ──
-  { id: 'EV01', s1: ['The {TARGET} alone is all the evidence anyone needs.', 'The {TARGET} alone are all the evidence anyone needs.'], s2: ['The {SECOND_TARGET} just confirms the whole theory.', 'The {SECOND_TARGET} just confirm the whole theory.'] },
-  { id: 'EV02', s1: ['That {TARGET} is all the proof required to close this case.', 'Those {TARGET} are all the proof required to close this case.'], s2: ['The {SECOND_TARGET} sealed the verdict permanently.', 'The {SECOND_TARGET} sealed the verdict permanently.'] },
-  { id: 'EV03', s1: ['Your {TARGET} already submitted itself as exhibit A.', 'Your {TARGET} already submitted themselves as exhibit A.'], s2: ['The {SECOND_TARGET} filed the supporting documents.', 'The {SECOND_TARGET} filed the supporting documents.'] },
+  { id: 'EV01', s1: ['The {TARGET} alone is all the evidence anyone needs.', 'The {TARGET} alone are all the evidence anyone needs.'], s2: ['The {SECOND_TARGET} just made it worse.', 'The {SECOND_TARGET} just made it worse.'] },
+  { id: 'EV02', s1: ['That {TARGET} already said everything.', 'Those {TARGET} already said everything.'], s2: ['The {SECOND_TARGET} just backed it up.', 'The {SECOND_TARGET} just backed it up.'] },
+  { id: 'EV03', s1: ['Your {TARGET} already submitted itself as exhibit A.', 'Your {TARGET} already submitted themselves as exhibit A.'], s2: ['The {SECOND_TARGET} showed up as backup.', 'The {SECOND_TARGET} showed up as backup.'] },
   { id: 'EV04', s1: ['If anyone needed proof, your {TARGET} just settled it.', 'If anyone needed proof, your {TARGET} just settled it.'], s2: ['That {SECOND_TARGET} wrote the closing argument.', 'Those {SECOND_TARGET} wrote the closing argument.'] },
-  { id: 'EV05', s1: ['The {TARGET} speaks for itself and the testimony is damning.', 'The {TARGET} speak for themselves and the testimony is damning.'], s2: ['The {SECOND_TARGET} corroborated every word of it.', 'The {SECOND_TARGET} corroborated every word of it.'] },
+  { id: 'EV05', s1: ['The {TARGET} speaks for itself and it is not good.', 'The {TARGET} speak for themselves and it is not good.'], s2: ['The {SECOND_TARGET} agreed out loud.', 'The {SECOND_TARGET} agreed out loud.'] },
 
   // ── FAMILY: SOCIAL SHAME (placement / drafts / group chat logic) ──
   { id: 'SS01', s1: ['Your {TARGET} got this photo forwarded to the group chat.', 'Your {TARGET} got this photo forwarded to the group chat.'], s2: ['The {SECOND_TARGET} made it the pinned message.', 'The {SECOND_TARGET} made it the pinned message.'] },
@@ -4867,9 +4908,9 @@ const NSV_STRUCTURES = [
   { id: 'SS05', s1: ['Someone screenshotted this before you could delete that {TARGET}.', 'Someone screenshotted this before you could delete those {TARGET}.'], s2: ['The {SECOND_TARGET} made it worth saving forever.', 'The {SECOND_TARGET} made it worth saving forever.'] },
 
   // ── FAMILY: VERDICT (judgment / ruling / finality logic) ──
-  { id: 'VD01', s1: ['The verdict on your {TARGET} came back and it is devastating.', 'The verdict on your {TARGET} came back and it is devastating.'], s2: ['The {SECOND_TARGET} eliminated any chance of appeal.', 'The {SECOND_TARGET} eliminated any chance of appeal.'] },
-  { id: 'VD02', s1: ['Your {TARGET} just closed the case on this entire photo.', 'Your {TARGET} just closed the case on this entire photo.'], s2: ['That {SECOND_TARGET} delivered the final ruling.', 'Those {SECOND_TARGET} delivered the final ruling.'] },
-  { id: 'VD03', s1: ['No jury would look at that {TARGET} and rule favorably.', 'No jury would look at those {TARGET} and rule favorably.'], s2: ['The {SECOND_TARGET} would get the case thrown out.', 'The {SECOND_TARGET} would get the case thrown out.'] },
+  { id: 'VD01', s1: ['The results on your {TARGET} came back and it is bad.', 'The results on your {TARGET} came back and it is bad.'], s2: ['The {SECOND_TARGET} made it hopeless.', 'The {SECOND_TARGET} made it hopeless.'] },
+  { id: 'VD02', s1: ['Your {TARGET} just shut this whole photo down.', 'Your {TARGET} just shut this whole photo down.'], s2: ['That {SECOND_TARGET} finished it off.', 'Those {SECOND_TARGET} finished it off.'] },
+  { id: 'VD03', s1: ['Nobody would look at that {TARGET} and think this was okay.', 'Nobody would look at those {TARGET} and think this was okay.'], s2: ['The {SECOND_TARGET} removed all doubt.', 'The {SECOND_TARGET} removed all doubt.'] },
   { id: 'VD04', s1: ['That {TARGET} already decided how this photo gets remembered.', 'Those {TARGET} already decided how this photo gets remembered.'], s2: ['The {SECOND_TARGET} made sure nobody forgets it.', 'The {SECOND_TARGET} made sure nobody forgets it.'] },
   { id: 'VD05', s1: ['Your {TARGET} entered this photo into evidence against you.', 'Your {TARGET} entered this photo into evidence against you.'], s2: ['The {SECOND_TARGET} testified as a hostile witness.', 'The {SECOND_TARGET} testified as a hostile witness.'] },
 
@@ -4877,12 +4918,12 @@ const NSV_STRUCTURES = [
   { id: 'NR01', s1: ['One look at your {TARGET} and everyone already knows the story.', 'One look at your {TARGET} and everyone already knows the story.'], s2: ['The {SECOND_TARGET} added the tragic epilogue.', 'The {SECOND_TARGET} added the tragic epilogue.'] },
   { id: 'NR02', s1: ['The story this photo tells starts and ends with that {TARGET}.', 'The story this photo tells starts and ends with those {TARGET}.'], s2: ['The {SECOND_TARGET} wrote the worst chapter.', 'The {SECOND_TARGET} wrote the worst chapter.'] },
   { id: 'NR03', s1: ['Somewhere between the camera and the upload your {TARGET} ruined everything.', 'Somewhere between the camera and the upload your {TARGET} ruined everything.'], s2: ['The {SECOND_TARGET} made sure there were witnesses.', 'The {SECOND_TARGET} made sure there were witnesses.'] },
-  { id: 'NR04', s1: ['There is an entire timeline that led to this {TARGET}.', 'There is an entire timeline that led to these {TARGET}.'], s2: ['The {SECOND_TARGET} proved the whole journey was pointless.', 'The {SECOND_TARGET} proved the whole journey was pointless.'] },
-  { id: 'NR05', s1: ['This photo had potential until the {TARGET} showed up uninvited.', 'This photo had potential until the {TARGET} showed up uninvited.'], s2: ['The {SECOND_TARGET} made sure it never recovered.', 'The {SECOND_TARGET} made sure it never recovered.'] },
+  { id: 'NR04', s1: ['Everything in this photo led up to that {TARGET}.', 'Everything in this photo led up to those {TARGET}.'], s2: ['The {SECOND_TARGET} wrecked whatever was left.', 'The {SECOND_TARGET} wrecked whatever was left.'] },
+  { id: 'NR05', s1: ['This photo had potential until the {TARGET} showed up uninvited.', 'This photo had potential until the {TARGET} showed up uninvited.'], s2: ['The {SECOND_TARGET} killed whatever chance it had.', 'The {SECOND_TARGET} killed whatever chance it had.'] },
 
   // ── FAMILY: CONFIDENCE / SELF-OWN (doubling down / posting anyway) ──
   { id: 'CO01', s1: ['Your {TARGET} is proof you doubled down on all of this.', 'Your {TARGET} are proof you doubled down on all of this.'], s2: ['The {SECOND_TARGET} shows you meant every bit of it.', 'The {SECOND_TARGET} show you meant every bit of it.'] },
-  { id: 'CO02', s1: ['You saw that {TARGET} in the preview and still hit post.', 'You saw those {TARGET} in the preview and still hit post.'], s2: ['The {SECOND_TARGET} confirms there was no hesitation.', 'The {SECOND_TARGET} confirm there was no hesitation.'] },
+  { id: 'CO02', s1: ['You saw that {TARGET} in the preview and still hit post.', 'You saw those {TARGET} in the preview and still hit post.'], s2: ['The {SECOND_TARGET} proves you meant it.', 'The {SECOND_TARGET} prove you meant it.'] },
   { id: 'CO03', s1: ['The confidence it took to post this with that {TARGET} is staggering.', 'The confidence it took to post this with those {TARGET} is staggering.'], s2: ['The {SECOND_TARGET} made it genuinely historic.', 'The {SECOND_TARGET} made it genuinely historic.'] },
   { id: 'CO04', s1: ['That {TARGET} says you checked the mirror and chose violence anyway.', 'Those {TARGET} say you checked the mirror and chose violence anyway.'], s2: ['The {SECOND_TARGET} says you meant it personally.', 'The {SECOND_TARGET} say you meant it personally.'] },
   { id: 'CO05', s1: ['Your {TARGET} is what happens when self-awareness takes the day off.', 'Your {TARGET} are what happens when self-awareness takes the day off.'], s2: ['The {SECOND_TARGET} clocked in to make it worse.', 'The {SECOND_TARGET} clocked in to make it worse.'] },
@@ -4896,10 +4937,10 @@ const NSV_STRUCTURES = [
 
   // ── FAMILY: CONTRAST (expectation vs. reality / before-after logic) ──
   { id: 'CT01', s1: ['Your {TARGET} makes every part of this moment impossible to defend.', 'Your {TARGET} make every part of this moment impossible to defend.'], s2: ['The {SECOND_TARGET} removed the last line of defense.', 'The {SECOND_TARGET} removed the last line of defense.'] },
-  { id: 'CT02', s1: ['This could have been a decent photo but the {TARGET} intervened.', 'This could have been a decent photo but the {TARGET} intervened.'], s2: ['The {SECOND_TARGET} blocked any chance of recovery.', 'The {SECOND_TARGET} blocked any chance of recovery.'] },
+  { id: 'CT02', s1: ['This could have been a decent photo but the {TARGET} intervened.', 'This could have been a decent photo but the {TARGET} intervened.'], s2: ['The {SECOND_TARGET} finished the job.', 'The {SECOND_TARGET} finished the job.'] },
   { id: 'CT03', s1: ['The rest of the photo tried its best but that {TARGET} refused.', 'The rest of the photo tried its best but those {TARGET} refused.'], s2: ['The {SECOND_TARGET} picked the wrong side entirely.', 'The {SECOND_TARGET} picked the wrong side entirely.'] },
-  { id: 'CT04', s1: ['Without that {TARGET} this photo might have had a chance.', 'Without those {TARGET} this photo might have had a chance.'], s2: ['The {SECOND_TARGET} made absolutely certain it did not.', 'The {SECOND_TARGET} made absolutely certain it did not.'] },
-  { id: 'CT05', s1: ['Your {TARGET} turned what could have been fine into a disaster.', 'Your {TARGET} turned what could have been fine into a disaster.'], s2: ['The {SECOND_TARGET} escalated it beyond all repair.', 'The {SECOND_TARGET} escalated it beyond all repair.'] },
+  { id: 'CT04', s1: ['Without that {TARGET} this photo might have had a chance.', 'Without those {TARGET} this photo might have had a chance.'], s2: ['The {SECOND_TARGET} made sure it didn\'t.', 'The {SECOND_TARGET} made sure it didn\'t.'] },
+  { id: 'CT05', s1: ['Your {TARGET} turned what could have been fine into a disaster.', 'Your {TARGET} turned what could have been fine into a disaster.'], s2: ['The {SECOND_TARGET} made it even worse.', 'The {SECOND_TARGET} made it even worse.'] },
 
   // ── FAMILY: PUBLIC EXPOSURE (broadcasting / permanence / receipts) ──
   { id: 'PE01', s1: ['Your {TARGET} turned this into a permanently documented incident.', 'Your {TARGET} turned this into a permanently documented incident.'], s2: ['The {SECOND_TARGET} got it trending immediately.', 'The {SECOND_TARGET} got it trending immediately.'] },
@@ -5194,14 +5235,14 @@ function generateNuclearSvSkeletons(tags) {
 
     // 4) S2 escalation quality: reward aggressive escalation language: +10
     const s2Lower = s2Filled.toLowerCase();
-    const NSV_ESCALATION_RE = /\b(sealed|confirmed|eliminated|delivered|testified|catastrophe|ruined|permanently|trending|never be deleted|first result|hostile witness|closing argument|blocked|escalated|beyond.+repair|impossible to ignore|made absolutely certain)\b/i;
+    const NSV_ESCALATION_RE = /\b(catastrophe|ruined|permanently|trending|never be deleted|first result|hostile witness|closing argument|finished the job|killed whatever|made it even worse|made sure it didn't|wrecked whatever|removed all doubt|made it hopeless|shut.+down|showed up as backup|backed it up|agreed out loud|impossible to ignore)\b/i;
     if (NSV_ESCALATION_RE.test(s2Lower)) { wcScore += 10; scoreBreakdown.push('s2Escalation+10'); }
 
     // 5) Anchor-and-payoff bonus: reward S2 that pays off S1's setup (+8)
     // S1 sets up with attempt/observation language, S2 lands with reversal/consequence language
     const s1Lower = s1Filled.toLowerCase();
     const S1_SETUP_RE = /\b(tried|looked|felt|suggested|almost|thought|could have|had potential|had a chance|started to|attempted)\b/;
-    const S2_PAYOFF_RE = /\b(ruined|proved|made sure|confirmed|finished|killed|exposed|noticed|sealed|eliminated|ended|destroyed|buried|ensured|upgraded|sided with|backed up|brought.+down|blocked|escalated|picked the wrong|nodded along|made.+certain)\b/;
+    const S2_PAYOFF_RE = /\b(ruined|made sure|finished|killed|exposed|noticed|ended|destroyed|buried|ensured|upgraded|sided with|backed up|backed it up|brought.+down|picked the wrong|nodded along|wrecked|removed all doubt|made it hopeless|shut.+down|showed up as|agreed out loud|even worse|meant it)\b/;
     const s1HasSetup = S1_SETUP_RE.test(s1Lower);
     const s2HasPayoff = S2_PAYOFF_RE.test(s2Lower);
     if (s1HasSetup && s2HasPayoff) {
@@ -5218,6 +5259,14 @@ function generateNuclearSvSkeletons(tags) {
     if (state.recentS2Patterns && state.recentS2Patterns.includes(s2PatternId)) {
       wcScore -= 6; scoreBreakdown.push('s2PatternFatigue-6');
     }
+
+    // 7) Soft narration/legal tone penalty
+    const narrPen = nsvNarrationPenalty(skeleton);
+    if (narrPen > 0) { wcScore -= narrPen; scoreBreakdown.push(`narration-${narrPen}`); }
+
+    // 8) Weak family downweight (narration/verdict sound too essay-like)
+    if (familyId === 'FAMILY_NARRATIVE') { wcScore -= 4; scoreBreakdown.push('weakFamNarr-4'); }
+    if (familyId === 'FAMILY_VERDICT') { wcScore -= 2; scoreBreakdown.push('weakFamVerd-2'); }
 
     candidates.push({ structure, familyId, target, secondTarget, skeleton, wcScore, wordCount: wc, scoreBreakdown });
   }
@@ -5384,6 +5433,10 @@ async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTarget
     }
     if (nv2HasBannedPatterns(result)) {
       if (isDev) console.log(`[nuclear-sv] validation fail: bannedPattern text="${result}"`);
+      return null;
+    }
+    if (nsvHasBannedPhrases(result)) {
+      if (isDev) console.log(`[nuclear-sv] validation fail: nsvBannedPhrase text="${result}"`);
       return null;
     }
 
