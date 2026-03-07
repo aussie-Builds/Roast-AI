@@ -490,13 +490,7 @@ const MEDIUM_EFFORT_WORDS = [
 
 const MEDIUM_WEAK_WORDS = ['nice', 'okay', 'fine', 'kinda', 'maybe'];
 
-// Medium V2: style diversity hints (rotated per request)
-const MEDIUM_STYLE_HINTS = [
-  'Style: effort mismatch — the preparation was visible but the result fell short.',
-  'Style: social read — describe what others would notice seeing this photo.',
-  'Style: quiet cringe — the secondhand embarrassment is the punchline.',
-  'Style: unearned confidence — the swagger exceeded the substance.',
-];
+// (MEDIUM_STYLE_HINTS removed — old 12-call LLM pipeline replaced by template engine)
 
 // --- Mild V2 constants ---
 const MILD_BANNED_OPENERS = [
@@ -516,11 +510,94 @@ const MILD_HARSH_WORDS = [
 ];
 
 // Mild V2: style diversity hints (rotated per request)
-const MILD_STYLE_HINTS = [
-  'Style: friendly tease — like a friend gently pointing something out.',
-  'Style: light observation — notice something visible and make it funny.',
-  'Style: playful jab — warm humor, zero sting.',
+// --- Mild V2 Structure Templates (1-sentence, {TARGET} + {OBSERVATION}) ---
+// Each template has [singular, plural] variants for grammar correctness.
+const MLV2_STRUCTURE_TEMPLATES = [
+  // ── FAMILY: THAT (pointing out) ──
+  { id: 'L01', tpl: ['That {TARGET} {OBSERVATION}.', 'Those {TARGET} {OBSERVATION}.'] },
+  { id: 'L04', tpl: ['That {TARGET} is doing a little extra today.', 'Those {TARGET} are doing a little extra today.'] },
+  { id: 'L09', tpl: ['That {TARGET} showed up early and the photo noticed.', 'Those {TARGET} showed up early and the photo noticed.'] },
+  { id: 'L19', tpl: ['That {TARGET} made a quiet entrance and stayed.', 'Those {TARGET} made a quiet entrance and stayed.'] },
+  { id: 'L22', tpl: ['That {TARGET} came with more confidence than support.', 'Those {TARGET} came with more confidence than support.'] },
+  { id: 'L25', tpl: ['That {TARGET} had an idea and the camera caught it.', 'Those {TARGET} had an idea and the camera caught it.'] },
+  { id: 'L28', tpl: ['That {TARGET} is not even trying to be subtle.', 'Those {TARGET} are not even trying to be subtle.'] },
+
+  // ── FAMILY: THE (observational) ──
+  { id: 'L02', tpl: ['The {TARGET} {OBSERVATION} and no one said a word.', 'The {TARGET} {OBSERVATION} and no one said a word.'] },
+  { id: 'L05', tpl: ['The {TARGET} is running this whole photo.', 'The {TARGET} are running this whole photo.'] },
+  { id: 'L10', tpl: ['The {TARGET} noticed the camera before you did.', 'The {TARGET} noticed the camera before you did.'] },
+  { id: 'L15', tpl: ['The {TARGET} {OBSERVATION} quietly.', 'The {TARGET} {OBSERVATION} quietly.'] },
+  { id: 'L20', tpl: ['The {TARGET} is doing the heavy lifting here.', 'The {TARGET} are doing the heavy lifting here.'] },
+  { id: 'L26', tpl: ['The {TARGET} showed up and immediately took over.', 'The {TARGET} showed up and immediately took over.'] },
+
+  // ── FAMILY: YOUR (gentle address) ──
+  { id: 'L03', tpl: ['Your {TARGET} {OBSERVATION} and the photo kept it.', 'Your {TARGET} {OBSERVATION} and the photo kept it.'] },
+  { id: 'L06', tpl: ['Your {TARGET} arrived with a whole plan.', 'Your {TARGET} arrived with a whole plan.'] },
+  { id: 'L11', tpl: ['Your {TARGET} {OBSERVATION} a little.', 'Your {TARGET} {OBSERVATION} a little.'] },
+  { id: 'L16', tpl: ['Your {TARGET} is giving you away just slightly.', 'Your {TARGET} are giving you away just slightly.'] },
+  { id: 'L21', tpl: ['Your {TARGET} brought its own agenda to this.', 'Your {TARGET} brought their own agenda to this.'] },
+  { id: 'L27', tpl: ['Your {TARGET} {OBSERVATION} and honestly good for it.', 'Your {TARGET} {OBSERVATION} and honestly good for it.'] },
+
+  // ── FAMILY: INDIRECT (situation as subject) ──
+  { id: 'L07', tpl: ['Something about the {TARGET} {OBSERVATION}.', 'Something about the {TARGET} {OBSERVATION}.'] },
+  { id: 'L08', tpl: ['Not sure the {TARGET} got the memo.', 'Not sure the {TARGET} got the memo.'] },
+  { id: 'L12', tpl: ['The photo almost worked and then the {TARGET} got involved.', 'The photo almost worked and then the {TARGET} got involved.'] },
+  { id: 'L13', tpl: ['Everything else is cooperating except the {TARGET}.', 'Everything else is cooperating except the {TARGET}.'] },
+  { id: 'L18', tpl: ['Somebody let that {TARGET} into the frame unsupervised.', 'Somebody let those {TARGET} into the frame unsupervised.'] },
+  { id: 'L23', tpl: ['The rest of the photo is behaving and the {TARGET} is not.', 'The rest of the photo is behaving and the {TARGET} are not.'] },
+  { id: 'L24', tpl: ['Nobody warned the {TARGET} this was a photo.', 'Nobody warned the {TARGET} this was a photo.'] },
 ];
+
+const MLV2_TEMPLATE_FAMILY = {
+  L01: 'FAMILY_THAT', L04: 'FAMILY_THAT', L09: 'FAMILY_THAT',
+  L19: 'FAMILY_THAT', L22: 'FAMILY_THAT', L25: 'FAMILY_THAT',
+  L28: 'FAMILY_THAT',
+  L02: 'FAMILY_THE', L05: 'FAMILY_THE', L10: 'FAMILY_THE',
+  L15: 'FAMILY_THE', L20: 'FAMILY_THE', L26: 'FAMILY_THE',
+  L03: 'FAMILY_YOUR', L06: 'FAMILY_YOUR', L11: 'FAMILY_YOUR',
+  L16: 'FAMILY_YOUR', L21: 'FAMILY_YOUR', L27: 'FAMILY_YOUR',
+  L07: 'FAMILY_INDIRECT', L08: 'FAMILY_INDIRECT', L12: 'FAMILY_INDIRECT',
+  L13: 'FAMILY_INDIRECT', L18: 'FAMILY_INDIRECT', L23: 'FAMILY_INDIRECT',
+  L24: 'FAMILY_INDIRECT',
+};
+
+// --- Mild V2 Observations (gentle, playful — no judgments) ---
+const MLV2_OBSERVATION_POOL = [
+  // noticed
+  'is trying its best', 'came with confidence', 'showed up uninvited',
+  'is pulling focus', 'is doing a lot right now',
+  // gentle surprise
+  'took the spotlight', 'set the tone immediately',
+  'got there first', 'stole the scene a little', 'made itself known',
+  // light commentary
+  'is on its own journey', 'is having a moment', 'chose to participate',
+  'went for it', 'decided today was the day',
+  'is working with what it has', 'picked a side',
+  // soft contradiction
+  'almost blended in', 'nearly went unnoticed', 'tried to be subtle',
+  'wanted to cooperate but did not', 'was close to landing',
+  // playful escalation
+  'came in hot', 'is not reading the room', 'has opinions',
+  'brought the whole performance', 'is freelancing',
+];
+
+// --- Mild V2 Targets (same visible features, lighter selection) ---
+const MLV2_TARGET_POOL = [
+  'smile', 'angle', 'expression', 'pose', 'background', 'lighting',
+  'outfit', 'hair', 'stance', 'crop', 'head tilt', 'grin',
+  'squint', 'shirt', 'hoodie', 'glasses', 'hat', 'collar',
+  'eyebrows', 'jacket', 'shadow', 'posture', 'stare',
+];
+
+const MLV2_SAFE_FALLBACKS = [
+  'That angle is doing something and honestly good for it.',
+  'The lighting showed up with more confidence than expected.',
+  'Something about this photo is working really hard.',
+  'The background is minding its own business and thriving.',
+  'That pose came with a plan and almost stuck the landing.',
+];
+
+const MLV2_LOCAL_CANDIDATES = 10;
 
 // Savage V2: verdict framing starters for sentence 1 (scoring bonus)
 const SAVAGE_VERDICT_STARTERS = [
@@ -4896,8 +4973,8 @@ const NSV_STRUCTURES = [
   // ── FAMILY: EVIDENCE (proving / case-building logic) ──
   { id: 'EV01', s1: ['The {TARGET} alone is all the evidence anyone needs.', 'The {TARGET} alone are all the evidence anyone needs.'], s2: ['The {SECOND_TARGET} just made it worse.', 'The {SECOND_TARGET} just made it worse.'] },
   { id: 'EV02', s1: ['That {TARGET} already said everything.', 'Those {TARGET} already said everything.'], s2: ['The {SECOND_TARGET} just backed it up.', 'The {SECOND_TARGET} just backed it up.'] },
-  { id: 'EV03', s1: ['Your {TARGET} already submitted itself as exhibit A.', 'Your {TARGET} already submitted themselves as exhibit A.'], s2: ['The {SECOND_TARGET} showed up as backup.', 'The {SECOND_TARGET} showed up as backup.'] },
-  { id: 'EV04', s1: ['If anyone needed proof, your {TARGET} just settled it.', 'If anyone needed proof, your {TARGET} just settled it.'], s2: ['That {SECOND_TARGET} wrote the closing argument.', 'Those {SECOND_TARGET} wrote the closing argument.'] },
+  { id: 'EV03', s1: ['Your {TARGET} already told on you.', 'Your {TARGET} already told on you.'], s2: ['The {SECOND_TARGET} showed up as backup.', 'The {SECOND_TARGET} showed up as backup.'] },
+  { id: 'EV04', s1: ['If anyone needed proof, your {TARGET} just settled it.', 'If anyone needed proof, your {TARGET} just settled it.'], s2: ['That {SECOND_TARGET} sealed the case immediately.', 'Those {SECOND_TARGET} sealed the case immediately.'] },
   { id: 'EV05', s1: ['The {TARGET} speaks for itself and it is not good.', 'The {TARGET} speak for themselves and it is not good.'], s2: ['The {SECOND_TARGET} agreed out loud.', 'The {SECOND_TARGET} agreed out loud.'] },
 
   // ── FAMILY: SOCIAL SHAME (placement / drafts / group chat logic) ──
@@ -4910,9 +4987,9 @@ const NSV_STRUCTURES = [
   // ── FAMILY: VERDICT (judgment / ruling / finality logic) ──
   { id: 'VD01', s1: ['The results on your {TARGET} came back and it is bad.', 'The results on your {TARGET} came back and it is bad.'], s2: ['The {SECOND_TARGET} made it hopeless.', 'The {SECOND_TARGET} made it hopeless.'] },
   { id: 'VD02', s1: ['Your {TARGET} just shut this whole photo down.', 'Your {TARGET} just shut this whole photo down.'], s2: ['That {SECOND_TARGET} finished it off.', 'Those {SECOND_TARGET} finished it off.'] },
-  { id: 'VD03', s1: ['Nobody would look at that {TARGET} and think this was okay.', 'Nobody would look at those {TARGET} and think this was okay.'], s2: ['The {SECOND_TARGET} removed all doubt.', 'The {SECOND_TARGET} removed all doubt.'] },
+  { id: 'VD03', s1: ['Nobody would look at that {TARGET} and think this was okay.', 'Nobody would look at those {TARGET} and think this was okay.'], s2: ['The {SECOND_TARGET} sealed it.', 'The {SECOND_TARGET} sealed it.'] },
   { id: 'VD04', s1: ['That {TARGET} already decided how this photo gets remembered.', 'Those {TARGET} already decided how this photo gets remembered.'], s2: ['The {SECOND_TARGET} made sure nobody forgets it.', 'The {SECOND_TARGET} made sure nobody forgets it.'] },
-  { id: 'VD05', s1: ['Your {TARGET} entered this photo into evidence against you.', 'Your {TARGET} entered this photo into evidence against you.'], s2: ['The {SECOND_TARGET} testified as a hostile witness.', 'The {SECOND_TARGET} testified as a hostile witness.'] },
+  { id: 'VD05', s1: ['Your {TARGET} put this whole photo on trial.', 'Your {TARGET} put this whole photo on trial.'], s2: ['The {SECOND_TARGET} confirmed everything.', 'The {SECOND_TARGET} confirmed everything.'] },
 
   // ── FAMILY: NARRATIVE (storytelling / scene-setting logic) ──
   { id: 'NR01', s1: ['One look at your {TARGET} and everyone already knows the story.', 'One look at your {TARGET} and everyone already knows the story.'], s2: ['The {SECOND_TARGET} added the tragic epilogue.', 'The {SECOND_TARGET} added the tragic epilogue.'] },
@@ -4944,7 +5021,7 @@ const NSV_STRUCTURES = [
 
   // ── FAMILY: PUBLIC EXPOSURE (broadcasting / permanence / receipts) ──
   { id: 'PE01', s1: ['Your {TARGET} turned this into a permanently documented incident.', 'Your {TARGET} turned this into a permanently documented incident.'], s2: ['The {SECOND_TARGET} got it trending immediately.', 'The {SECOND_TARGET} got it trending immediately.'] },
-  { id: 'PE02', s1: ['That {TARGET} made this photo a matter of public record.', 'Those {TARGET} made this photo a matter of public record.'], s2: ['The {SECOND_TARGET} ensured it can never be deleted.', 'The {SECOND_TARGET} ensured it can never be deleted.'] },
+  { id: 'PE02', s1: ['That {TARGET} made this photo everyone\'s problem.', 'Those {TARGET} made this photo everyone\'s problem.'], s2: ['The {SECOND_TARGET} made sure nobody forgets it.', 'The {SECOND_TARGET} made sure nobody forgets it.'] },
   { id: 'PE03', s1: ['Thanks to that {TARGET} this is now permanently searchable online.', 'Thanks to those {TARGET} this is now permanently searchable online.'], s2: ['The {SECOND_TARGET} made it the first result.', 'The {SECOND_TARGET} made it the first result.'] },
   { id: 'PE04', s1: ['Your {TARGET} just guaranteed this photo outlives your dignity.', 'Your {TARGET} just guaranteed this photo outlives your dignity.'], s2: ['The {SECOND_TARGET} is making sure of it personally.', 'The {SECOND_TARGET} are making sure of it personally.'] },
   { id: 'PE05', s1: ['That {TARGET} broadcast everything you were trying to keep quiet.', 'Those {TARGET} broadcast everything you were trying to keep quiet.'], s2: ['The {SECOND_TARGET} turned up the volume on it.', 'The {SECOND_TARGET} turned up the volume on it.'] },
@@ -4982,6 +5059,56 @@ const NSV_TARGET_POOL = [
   'crop', 'shoes', 'background', 'hat', 'hair', 'collar', 'squint',
   'head tilt', 'jacket', 'eye contact', 'watch', 'stare', 'grin',
 ];
+
+// --- Target category helpers for cross-category pairing ---
+const NSV_TARGET_CATEGORIES = {
+  face: ['grin', 'smile', 'squint', 'eye contact', 'expression', 'beard', 'hairline', 'jawline', 'stare', 'eyebrows', 'hair'],
+  clothing: ['shirt', 'jacket', 'hoodie', 'fit', 'collar', 'outfit', 'shoes'],
+  pose: ['angle', 'stance', 'head tilt', 'posture', 'crop'],
+  background: ['background', 'garage', 'shelves', 'room', 'wall', 'car'],
+  accessory: ['glasses', 'watch', 'hat', 'chain'],
+};
+const _nsvTargetCatMap = {};
+for (const [cat, items] of Object.entries(NSV_TARGET_CATEGORIES)) {
+  for (const item of items) _nsvTargetCatMap[item] = cat;
+}
+const NSV_CAT_KEYWORD_FALLBACKS = [
+  [/tee|sweater|polo|vest|pants|jeans|socks|shorts|dress|skirt|blazer/i, 'clothing'],
+  [/grin|smirk|frown|brow|cheek|chin|forehead|lip|nose|teeth/i, 'face'],
+  [/lean|crouch|slouch|sitting|standing/i, 'pose'],
+  [/desk|couch|door|window|floor|ceiling|tree|grass|sky|monitor|printer/i, 'background'],
+  [/ring|necklace|bracelet|earring|bag|sunglasses|cap|bandana/i, 'accessory'],
+];
+function getRoastTargetCategory(target = '') {
+  const t = String(target).toLowerCase();
+  if (_nsvTargetCatMap[t]) return _nsvTargetCatMap[t];
+  for (const [re, cat] of NSV_CAT_KEYWORD_FALLBACKS) {
+    if (re.test(t)) return cat;
+  }
+  return 'misc';
+}
+
+const NSV_NEAR_DUPES = [
+  ['grin', 'smile'], ['outfit', 'shirt'], ['outfit', 'fit'], ['fit', 'shirt'],
+  ['background', 'garage'], ['background', 'room'], ['background', 'wall'],
+  ['expression', 'stare'], ['expression', 'squint'], ['angle', 'head tilt'],
+];
+const _nsvDupeSet = new Set();
+for (const [a, b] of NSV_NEAR_DUPES) { _nsvDupeSet.add(`${a}|${b}`); _nsvDupeSet.add(`${b}|${a}`); }
+
+const NSV_STRONG_COMBOS = { 'face|clothing': 3, 'clothing|face': 3, 'face|background': 3, 'background|face': 3, 'pose|clothing': 2, 'clothing|pose': 2, 'pose|background': 2, 'background|pose': 2, 'accessory|face': 2, 'face|accessory': 2 };
+
+function targetPairingScore(primary, secondary) {
+  const pStr = String(primary).toLowerCase();
+  const sStr = String(secondary).toLowerCase();
+  if (_nsvDupeSet.has(`${pStr}|${sStr}`)) return -6;
+  const pCat = getRoastTargetCategory(pStr);
+  const sCat = getRoastTargetCategory(sStr);
+  let score = 0;
+  if (pCat === sCat) { score -= 4; }
+  else { score += 4; score += (NSV_STRONG_COMBOS[`${pCat}|${sCat}`] || 0); }
+  return score;
+}
 
 const NSV_CRITIQUE_POOL = [
   'you pressed post anyway and meant it',
@@ -5153,14 +5280,26 @@ function generateNuclearSvSkeletons(tags) {
     batchRecentTargets.push(typeof target === 'object' ? target.id : target);
     if (batchRecentTargets.length > NSV_MAX_RECENT_TARGETS) batchRecentTargets.shift();
 
-    // Pick SECOND_TARGET: must differ from TARGET
-    let secondTarget = nv2SelectWithAvoidance(
-      combinedTargets, [target, ...batchRecentTargets], NV2_MAX_SELECT_TRIES
-    );
-    // Fallback: if same as target, try once more
-    if (secondTarget === target) {
-      const altTargets = combinedTargets.filter(t => t !== target);
-      if (altTargets.length > 0) secondTarget = altTargets[Math.floor(Math.random() * altTargets.length)];
+    // Pick SECOND_TARGET: prefer complementary category to TARGET
+    const avoidSet = new Set([target, ...batchRecentTargets]);
+    const secondPool = combinedTargets.filter(t => t !== target && !avoidSet.has(t));
+    let secondTarget;
+    if (secondPool.length > 0) {
+      // Score each candidate, pick from top tier with randomness
+      const scored = secondPool.map(t => ({ t, ps: targetPairingScore(target, t) }));
+      scored.sort((a, b) => b.ps - a.ps);
+      const bestScore = scored[0].ps;
+      const topTier = scored.filter(s => s.ps >= bestScore - 1);
+      secondTarget = topTier[Math.floor(Math.random() * topTier.length)].t;
+    } else {
+      // Fallback: avoidance-based pick
+      secondTarget = nv2SelectWithAvoidance(
+        combinedTargets, [target, ...batchRecentTargets], NV2_MAX_SELECT_TRIES
+      );
+      if (secondTarget === target) {
+        const altTargets = combinedTargets.filter(t => t !== target);
+        if (altTargets.length > 0) secondTarget = altTargets[Math.floor(Math.random() * altTargets.length)];
+      }
     }
 
     // Select singular or plural template variant for each target
@@ -5235,14 +5374,14 @@ function generateNuclearSvSkeletons(tags) {
 
     // 4) S2 escalation quality: reward aggressive escalation language: +10
     const s2Lower = s2Filled.toLowerCase();
-    const NSV_ESCALATION_RE = /\b(catastrophe|ruined|permanently|trending|never be deleted|first result|hostile witness|closing argument|finished the job|killed whatever|made it even worse|made sure it didn't|wrecked whatever|removed all doubt|made it hopeless|shut.+down|showed up as backup|backed it up|agreed out loud|impossible to ignore)\b/i;
+    const NSV_ESCALATION_RE = /\b(catastrophe|ruined|permanently|trending|first result|finished the job|killed whatever|made it even worse|made sure it didn't|wrecked whatever|made it hopeless|shut.+down|showed up as backup|backed it up|agreed out loud|impossible to ignore|sealed the case|sealed it|confirmed everything|nobody forgets)\b/i;
     if (NSV_ESCALATION_RE.test(s2Lower)) { wcScore += 10; scoreBreakdown.push('s2Escalation+10'); }
 
     // 5) Anchor-and-payoff bonus: reward S2 that pays off S1's setup (+8)
     // S1 sets up with attempt/observation language, S2 lands with reversal/consequence language
     const s1Lower = s1Filled.toLowerCase();
     const S1_SETUP_RE = /\b(tried|looked|felt|suggested|almost|thought|could have|had potential|had a chance|started to|attempted)\b/;
-    const S2_PAYOFF_RE = /\b(ruined|made sure|finished|killed|exposed|noticed|ended|destroyed|buried|ensured|upgraded|sided with|backed up|backed it up|brought.+down|picked the wrong|nodded along|wrecked|removed all doubt|made it hopeless|shut.+down|showed up as|agreed out loud|even worse|meant it)\b/;
+    const S2_PAYOFF_RE = /\b(ruined|made sure|finished|killed|exposed|noticed|ended|destroyed|buried|ensured|upgraded|sided with|backed up|backed it up|brought.+down|picked the wrong|nodded along|wrecked|made it hopeless|shut.+down|showed up as|agreed out loud|even worse|meant it|sealed the case|sealed it|confirmed everything|nobody forgets|told on you)\b/;
     const s1HasSetup = S1_SETUP_RE.test(s1Lower);
     const s2HasPayoff = S2_PAYOFF_RE.test(s2Lower);
     if (s1HasSetup && s2HasPayoff) {
@@ -5505,358 +5644,615 @@ async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTarget
   };
 }
 
-// --- Medium V2: single-winner candidate pipeline ---
-async function generateMediumV2({ imageBase64 }) {
+// ============================================================
+// MEDIUM V2: Template-based candidate pipeline
+// Replaces old 12-call LLM vision pipeline.
+// Architecture mirrors Savage V2: local skeleton gen → score → polish → validate.
+// Tone: friendly roast, "oof" moment, 1 sentence, 10–16 words.
+// ============================================================
+
+// --- Medium V2 Structure Templates (1-sentence, {TARGET} + {CRITIQUE}) ---
+// Each template has [singular, plural] variants for grammar correctness.
+const MV2_STRUCTURE_TEMPLATES = [
+  // ── FAMILY: YOUR (direct address) ──
+  { id: 'M01', tpl: ['Your {TARGET} {CRITIQUE} and the photo proves it.', 'Your {TARGET} {CRITIQUE} and the photo proves it.'] },
+  { id: 'M04', tpl: ['Your {TARGET} {CRITIQUE} and the camera caught all of it.', 'Your {TARGET} {CRITIQUE} and the camera caught all of it.'] },
+  { id: 'M06', tpl: ['Your {TARGET} really {CRITIQUE} in this one.', 'Your {TARGET} really {CRITIQUE} in this one.'] },
+  { id: 'M10', tpl: ['Your {TARGET} {CRITIQUE} and you just went with it.', 'Your {TARGET} {CRITIQUE} and you just went with it.'] },
+  { id: 'M14', tpl: ['Your {TARGET} told the whole story before the caption could.', 'Your {TARGET} told the whole story before the caption could.'] },
+  { id: 'M16', tpl: ['You gave that {TARGET} a lot of responsibility and it shows.', 'You gave those {TARGET} a lot of responsibility and it shows.'] },
+  { id: 'M22', tpl: ['You seemed confident about the {TARGET} but the photo less so.', 'You seemed confident about the {TARGET} but the photo less so.'] },
+
+  // ── FAMILY: THAT (pointing out) ──
+  { id: 'M02', tpl: ['That {TARGET} {CRITIQUE} but you posted this anyway.', 'Those {TARGET} {CRITIQUE} but you posted this anyway.'] },
+  { id: 'M05', tpl: ['That {TARGET} {CRITIQUE} and honestly fair enough.', 'Those {TARGET} {CRITIQUE} and honestly fair enough.'] },
+  { id: 'M12', tpl: ['That {TARGET} {CRITIQUE} louder than you probably wanted.', 'Those {TARGET} {CRITIQUE} louder than you probably wanted.'] },
+  { id: 'M15', tpl: ['That {TARGET} {CRITIQUE} and the background just watched.', 'Those {TARGET} {CRITIQUE} and the background just watched.'] },
+  { id: 'M17', tpl: ['That {TARGET} choice raised more questions than answers.', 'Those {TARGET} raised more questions than answers.'] },
+  { id: 'M20', tpl: ['That {TARGET} is making this harder to defend.', 'Those {TARGET} are making this harder to defend.'] },
+
+  // ── FAMILY: THE (observational) ──
+  { id: 'M03', tpl: ['The {TARGET} {CRITIQUE} and nobody said anything.', 'The {TARGET} {CRITIQUE} and nobody said anything.'] },
+  { id: 'M09', tpl: ['The {TARGET} is doing all the talking in this photo.', 'The {TARGET} are doing all the talking in this photo.'] },
+  { id: 'M13', tpl: ['The {TARGET} {CRITIQUE} before anyone even noticed the rest.', 'The {TARGET} {CRITIQUE} before anyone even noticed the rest.'] },
+  { id: 'M18', tpl: ['The {TARGET} is not helping your case here.', 'The {TARGET} are not helping your case here.'] },
+  { id: 'M21', tpl: ['The {TARGET} is doing a lot of explaining right now.', 'The {TARGET} are doing a lot of explaining right now.'] },
+  { id: 'M24', tpl: ['The background is trying to stay neutral but the {TARGET} made it personal.', 'The background is trying to stay neutral but the {TARGET} made it personal.'] },
+
+  // ── FAMILY: INDIRECT (photo/situation as subject) ──
+  { id: 'M07', tpl: ['Somebody should have mentioned that {TARGET} before you posted.', 'Somebody should have mentioned those {TARGET} before you posted.'] },
+  { id: 'M08', tpl: ['The photo might have worked without the {TARGET} getting involved.', 'The photo might have worked without the {TARGET} getting involved.'] },
+  { id: 'M11', tpl: ['Not sure that {TARGET} was the move but here we are.', 'Not sure those {TARGET} were the move but here we are.'] },
+  { id: 'M19', tpl: ['Everything else in this photo is fine and then there is the {TARGET}.', 'Everything else in this photo is fine and then there are the {TARGET}.'] },
+  { id: 'M23', tpl: ['The rest of the photo had a plan and then the {TARGET} showed up.', 'The rest of the photo had a plan and then the {TARGET} showed up.'] },
+];
+
+const MV2_TEMPLATE_FAMILY = {
+  M01: 'FAMILY_YOUR', M04: 'FAMILY_YOUR', M06: 'FAMILY_YOUR',
+  M10: 'FAMILY_YOUR', M14: 'FAMILY_YOUR', M16: 'FAMILY_YOUR',
+  M22: 'FAMILY_YOUR',
+  M02: 'FAMILY_THAT', M05: 'FAMILY_THAT', M12: 'FAMILY_THAT',
+  M15: 'FAMILY_THAT', M17: 'FAMILY_THAT', M20: 'FAMILY_THAT',
+  M03: 'FAMILY_THE', M09: 'FAMILY_THE', M13: 'FAMILY_THE',
+  M18: 'FAMILY_THE', M21: 'FAMILY_THE', M24: 'FAMILY_THE',
+  M07: 'FAMILY_INDIRECT', M08: 'FAMILY_INDIRECT', M11: 'FAMILY_INDIRECT',
+  M19: 'FAMILY_INDIRECT', M23: 'FAMILY_INDIRECT',
+};
+
+// --- Medium V2 Critiques (softer than Savage, "oof" not "ouch") ---
+const MV2_CRITIQUE_POOL = [
+  // effort/confidence
+  'is trying its best', 'came in confident', 'went all in',
+  'committed fully', 'showed up strong', 'took a swing',
+  // observation
+  'is pulling focus', 'is working overtime', 'is telling on you',
+  'is not blending in', 'is carrying everything', 'is doing the most',
+  // consequence
+  'made a choice', 'set the tone early', 'changed the whole vibe',
+  'shifted the energy immediately', 'got there first',
+  // playful judgment
+  'is making a strong argument and it might be the wrong one',
+  'raised some questions', 'is not going unnoticed',
+  'is fighting for attention', 'drew the eye for the wrong reasons',
+  'has a lot to answer for', 'is on its own journey',
+  'picked a side and it was not yours', 'brought the drama',
+  // light contradiction
+  'had a plan but the photo did not agree',
+  'is confident but the lighting is not',
+  'wanted to be the star and almost got there',
+];
+
+// --- Medium V2 Targets (shared pool — same visible features as other tiers) ---
+const MV2_TARGET_POOL = [
+  'hairline', 'posture', 'fit', 'smile', 'jawline', 'outfit', 'stance',
+  'angle', 'hoodie', 'expression', 'shirt', 'glasses', 'beard', 'eyebrows',
+  'crop', 'shoes', 'background', 'hat', 'hair', 'collar', 'squint',
+  'head tilt', 'jacket', 'eye contact', 'watch', 'stare', 'grin',
+];
+
+const MV2_SAFE_FALLBACKS = [
+  'That angle took some planning and it still did not quite land.',
+  'Somebody saw this photo before you posted it and said nothing.',
+  'The confidence in this photo is doing a lot of heavy lifting.',
+  'Everything in this photo is trying except the one thing that matters.',
+  'That outfit made a choice and the rest of the photo just went along with it.',
+];
+
+const MV2_LOCAL_CANDIDATES = 10;
+
+// --- Medium V2 client state (per-client fatigue tracking) ---
+const mediumClientState = new Map();
+const mediumStructureHistory = new Map();
+const mediumFamilyHistory = new Map();
+
+function getMediumClientState(clientId) {
+  if (!mediumClientState.has(clientId)) {
+    mediumClientState.set(clientId, {
+      recentRoasts: [],
+      recentTargets: [],
+      recentStructures: [],
+    });
+  }
+  return mediumClientState.get(clientId);
+}
+
+function pushMediumClientRoast(clientId, roast, target, structureId) {
+  const st = getMediumClientState(clientId);
+  st.recentRoasts.push(roast);
+  if (st.recentRoasts.length > 10) st.recentRoasts.shift();
+  st.recentTargets.push(target);
+  if (st.recentTargets.length > 6) st.recentTargets.shift();
+  st.recentStructures.push(structureId);
+  if (st.recentStructures.length > 6) st.recentStructures.shift();
+}
+
+function getMediumFamilyHistory(clientId) {
+  return mediumFamilyHistory.get(clientId) || [];
+}
+
+function pushMediumFamilyHistory(clientId, familyId) {
+  const hist = getMediumFamilyHistory(clientId);
+  hist.push(familyId);
+  while (hist.length > 3) hist.shift();
+  mediumFamilyHistory.set(clientId, hist);
+}
+
+// --- Medium V2 output cleaner (1 sentence, clamp to first sentence) ---
+function mv2CleanOutput(text) {
+  let out = text.trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/^\*+|\*+$/g, '')
+    .trim();
+  const sents = out.match(/[^.!?]*[.!?]+/g);
+  if (sents && sents.length > 1) {
+    out = sents[0].trim();
+  }
+  if (out && !/[.!?]$/.test(out)) out += '.';
+  return out;
+}
+
+// --- Medium V2 generator ---
+async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
   const isDev = process.env.NODE_ENV !== 'production';
-  const config = INTENSITY_CONFIG.medium;
-  const numCandidates = config.candidates || 12;
-  const rejectCounts = {};
-  const seen = new Set();
-  const fallbacks = FALLBACKS.medium;
+  const state = getMediumClientState(clientId);
+  const recentFamilies = getMediumFamilyHistory(clientId);
+  const structHistory = mediumStructureHistory.get(clientId) || [];
+  let fallbackUsed = false;
+  let pickedStructure = null;
+  let pickedTarget = null;
+  let finalRoast = null;
+  let wordCount = 0;
 
-  // Style diversity: rotate hints per request
-  const styleHint = ' ' + MEDIUM_STYLE_HINTS[Math.floor(Math.random() * MEDIUM_STYLE_HINTS.length)];
-
-  // Avoid block: penalize repetition of recent outputs
-  const avoidBlock = recentMediumRoasts.length > 0
-    ? `\n\nDO NOT REPEAT OR PARAPHRASE ANY OF THESE:\n${recentMediumRoasts.slice(-20).map(r => `- ${r}`).join('\n')}`
-    : '';
-
-  // System message
-  const sysMsg = `You are a sharp roast comedian. Write EXACTLY two sentences about this photo. Sentence 1 MUST end with a period. Sentence 2 MUST end with a period. No third sentence. 14–22 words total. Sentence 1: reference ONE visible detail (outfit, hair, pose, angle, background, expression, lighting). Sentence 2: escalate with social embarrassment or effort mismatch — the "oof" moment. Sentence 2 must be at least 4 words — NOT a short 2–3 word closer. Both sentences carry weight. NEVER use "you look like" or "looks like". No vibe/energy/aura. No questions. No advice or commands. No emojis. No quote marks. Plain text only — no JSON, no brackets, no labels.${styleHint}${avoidBlock}`;
-
-  // User prompt
-  const userPrompt = `Look at this selfie and write ONE roast. Write EXACTLY two sentences. Sentence 1 MUST end with a period. Sentence 2 MUST end with a period. No third sentence. 14–22 words total. Sentence 1: call out something visible (outfit, hair, pose, angle, background, expression, lighting). Sentence 2: escalate with social embarrassment or effort mismatch — at least 4 words, both sentences carry weight. Plain text only — no JSON, no formatting, no labels, no numbering.`;
-
-  const imageContent = [
-    { type: 'input_text', text: userPrompt },
-    { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-  ];
-
-  const buildCallOpts = () => {
-    const opts = {
-      model: 'gpt-4o',
-      input: [
-        { role: 'system', content: sysMsg },
-        { role: 'user', content: imageContent },
-      ],
-    };
-    if (config.maxTokens) opts.max_output_tokens = config.maxTokens;
-    if (config.temperature != null) opts.temperature = config.temperature;
-    if (config.presence_penalty != null) opts.presence_penalty = config.presence_penalty;
-    if (config.frequency_penalty != null) opts.frequency_penalty = config.frequency_penalty;
-    if (config.top_p != null) opts.top_p = config.top_p;
-    return opts;
-  };
-
-  // Generate N candidates in parallel — one plain-text roast per call
-  const calls = Array.from({ length: numCandidates }, () =>
-    openai.responses.create(buildCallOpts())
-      .then(r => r.output_text)
-      .catch(() => null)
-  );
-  const outputs = await Promise.all(calls);
-
+  // 1. Build local skeleton candidates and score them
   const candidates = [];
-  for (const raw of outputs) {
-    if (!raw) continue;
+  const batchRecentStructures = [...state.recentStructures];
+  const batchRecentTargets = [...state.recentTargets];
 
-    // Clean: strip code fences, JSON wrapping, surrounding quotes
-    let text = raw.trim()
-      .replace(/^```[\s\S]*?```$/g, '')
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/```$/, '')
-      .trim();
+  for (let i = 0; i < MV2_LOCAL_CANDIDATES; i++) {
+    // Pick structure with avoidance + family fatigue reroll
+    let structure = nv2SelectWithAvoidance(
+      MV2_STRUCTURE_TEMPLATES, batchRecentStructures, NV2_MAX_SELECT_TRIES
+    );
+    let familyId = MV2_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
 
-    // Salvage JSON-wrapped output
-    if (text.startsWith('{') || text.startsWith('[')) {
-      const salvaged = extractRoastText(text);
-      if (salvaged) {
-        text = salvaged;
-      } else {
-        rejectCounts['json-unwrap-fail'] = (rejectCounts['json-unwrap-fail'] || 0) + 1;
-        continue;
+    if (recentFamilies.includes(familyId)) {
+      const altTemplates = MV2_STRUCTURE_TEMPLATES.filter(t => {
+        const fam = MV2_TEMPLATE_FAMILY[t.id] || 'FAMILY_MISC';
+        return fam !== familyId;
+      });
+      if (altTemplates.length > 0) {
+        structure = nv2SelectWithAvoidance(
+          altTemplates, batchRecentStructures, NV2_MAX_SELECT_TRIES
+        );
+        familyId = MV2_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+      }
+    }
+    batchRecentStructures.push(structure.id);
+    if (batchRecentStructures.length > 6) batchRecentStructures.shift();
+
+    const target = nv2SelectWithAvoidance(
+      MV2_TARGET_POOL, batchRecentTargets, NV2_MAX_SELECT_TRIES
+    );
+    batchRecentTargets.push(target);
+    if (batchRecentTargets.length > 6) batchRecentTargets.shift();
+
+    const critique = MV2_CRITIQUE_POOL[Math.floor(Math.random() * MV2_CRITIQUE_POOL.length)];
+
+    // Plural detection for grammar agreement
+    const mv2Plurals = new Set(['glasses', 'shoes', 'eyebrows', 'pants', 'jeans', 'socks']);
+    const isPlural = mv2Plurals.has(target) || (target.endsWith('s') && !target.endsWith('ss'));
+
+    // Plural verb agreement in critique: "is trying" → "are trying"
+    let filledCritique = critique;
+    if (isPlural) {
+      filledCritique = filledCritique
+        .replace(/^is /, 'are ')
+        .replace(/^was /, 'were ')
+        .replace(/^has /, 'have ')
+        .replace(/ is not/, ' are not')
+        .replace(/ its /, ' their ');
+    }
+
+    // Select singular or plural template variant
+    const tplStr = Array.isArray(structure.tpl) ? structure.tpl[isPlural ? 1 : 0] : structure.tpl;
+
+    const skeleton = tplStr
+      .replace('{TARGET}', target)
+      .replace('{CRITIQUE}', filledCritique);
+
+    const wc = skeleton.split(/\s+/).length;
+
+    // Scoring: prefer 10–16 words for a single-sentence Medium roast
+    let wcScore = 0;
+    const scoreBreakdown = [];
+    if (wc >= 10 && wc <= 16) { wcScore += 14; scoreBreakdown.push('wcSweet+14'); }
+    if (wc >= 11 && wc <= 14) { wcScore += 6; scoreBreakdown.push('wcIdeal+6'); }
+    if (wc <= 8) { wcScore -= 10; scoreBreakdown.push('wcShort-10'); }
+    if (wc === 9) { wcScore -= 2; scoreBreakdown.push('wcBorder-2'); }
+    if (wc > 18) { wcScore -= 8; scoreBreakdown.push('wcLong-8'); }
+
+    // Structure fatigue
+    if (structHistory.includes(structure.id)) { wcScore -= 10; scoreBreakdown.push('structFatigue-10'); }
+
+    // Family fatigue
+    const lastFam = recentFamilies.length > 0 ? recentFamilies[recentFamilies.length - 1] : null;
+    if (lastFam && lastFam === familyId) { wcScore -= 6; scoreBreakdown.push('familyFatigue-6'); }
+
+    // Target fatigue
+    if (state.recentTargets.includes(target)) { wcScore -= 8; scoreBreakdown.push('targetFatigue-8'); }
+
+    candidates.push({ structure, familyId, target, critique: filledCritique, skeleton, wcScore, wordCount: wc, scoreBreakdown });
+  }
+
+  // 2. Sort: highest wcScore, tie-break by sweet-spot word count
+  candidates.sort((a, b) => {
+    if (b.wcScore !== a.wcScore) return b.wcScore - a.wcScore;
+    const aSweet = (a.wordCount >= 11 && a.wordCount <= 14) ? 1 : 0;
+    const bSweet = (b.wordCount >= 11 && b.wordCount <= 14) ? 1 : 0;
+    return bSweet - aSweet;
+  });
+
+  if (isDev) {
+    const top3 = candidates.slice(0, 3).map((c, i) =>
+      `#${i + 1} tmpl=${c.structure.id} fam=${c.familyId} wc=${c.wordCount} score=${c.wcScore} [${(c.scoreBreakdown || []).join(',')}]`
+    );
+    console.log(`[medium-v2] skeletons=${candidates.length} top3: ${top3.join(' | ')}`);
+  }
+
+  // 3. Polish best candidate via single LLM call (production only)
+  async function mv2PolishAndValidate(candidate) {
+    let polished = candidate.skeleton;
+    if (!process.env.TUNING_MODE) {
+      const polishPrompt = `Rewrite this roast to sound natural and conversational. Keep it friendly but pointed — an "oof" not an insult. Do NOT add new ideas or change the target. Keep it as 1 sentence. 10–16 words preferred. Output ONLY the rewritten roast.\n\nRoast: "${candidate.skeleton}"`;
+      try {
+        const polishResp = await openai.responses.create({
+          model: 'gpt-4o',
+          input: [
+            { role: 'system', content: 'You are a friendly roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Conversational, not cruel. 10–16 words.' },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: polishPrompt },
+                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+              ],
+            },
+          ],
+          max_output_tokens: 60,
+          temperature: 0.85,
+          top_p: 0.9,
+        });
+        if (polishResp.output_text) polished = polishResp.output_text;
+      } catch (err) {
+        if (isDev) console.log(`[medium-v2] polish error: ${err.message}`);
       }
     }
 
-    // Strip ALL quote characters (straight + curly) before validation to reduce medium-quotes rejects
-    text = text.replace(/["'\u201C\u201D\u2018\u2019]/g, '').replace(/\s+/g, ' ').trim();
-
-    // Repair common contractions broken by quote stripping (word-boundary safe)
-    const CONTRACTION_FIXES = [
-      [/\bcant\b/gi, "can't"], [/\bwont\b/gi, "won't"], [/\bdont\b/gi, "don't"],
-      [/\bdoesnt\b/gi, "doesn't"], [/\bdidnt\b/gi, "didn't"], [/\bcouldnt\b/gi, "couldn't"],
-      [/\bwouldnt\b/gi, "wouldn't"], [/\bisnt\b/gi, "isn't"], [/\barent\b/gi, "aren't"],
-      [/\byoure\b/gi, "you're"], [/\byoull\b/gi, "you'll"], [/\byouve\b/gi, "you've"],
-      [/\bive\b/gi, "I've"], [/\bim\b/gi, "I'm"],
-      [/\bthats\b/gi, "that's"], [/\bwhats\b/gi, "what's"], [/\btheres\b/gi, "there's"],
-      [/\bits like\b/gi, "it's like"], [/\bits just\b/gi, "it's just"],
-      [/\bits almost\b/gi, "it's almost"], [/\bits as if\b/gi, "it's as if"],
-    ];
-    for (const [re, fix] of CONTRACTION_FIXES) {
-      text = text.replace(re, fix);
+    let result = mv2CleanOutput(polished);
+    if (!result || result.length < 10) return null;
+    if (nv2HasBannedPatterns(result)) {
+      if (isDev) console.log(`[medium-v2] validation fail: bannedPattern text="${result}"`);
+      return null;
     }
-
-    // Clamp to 2 sentences, 22 words
-    let clamped = clampRoast(text, config.maxSentences, config.maxChars, config.maxWords);
-    if (!clamped || clamped.length < 10) continue;
-    const sents = clamped.match(/[^.!?]*[.!?]+/g);
-    if (sents && sents.length > 2) clamped = sents.slice(0, 2).map(s => s.trim()).join(' ');
-    const words = clamped.trim().split(/\s+/);
-    if (words.length > 22) clamped = words.slice(0, 22).join(' ').trim();
-    if (!/[.!?]$/.test(clamped)) clamped += '.';
-    if (!clamped || clamped.length < 10) continue;
-
-    // Validate
-    const v = validateRoast(clamped, 'medium');
-    if (!v.valid) {
-      for (const reason of v.reasons.slice(0, 2)) {
-        rejectCounts[reason] = (rejectCounts[reason] || 0) + 1;
-      }
-      continue;
+    if (!isPlaySafe(result)) {
+      if (isDev) console.log(`[medium-v2] validation fail: safety text="${result}"`);
+      return null;
     }
-
-    // Dedupe within request
-    const normKey = normalizeRoast(clamped);
-    if (seen.has(normKey)) continue;
-    seen.add(normKey);
-
-    // Score
-    const score = scoreRoast(clamped, 'medium');
-    candidates.push({ text: clamped, score });
+    return result;
   }
 
-  // Sort by score descending, pick ONE winner
-  candidates.sort((a, b) => b.score - a.score);
-  const fallbackUsed = candidates.length === 0;
-  const winner = fallbackUsed
-    ? fallbacks[Math.floor(Math.random() * fallbacks.length)]
-    : candidates[0].text;
-  const winnerScore = fallbackUsed ? 0 : candidates[0].score;
-
-  // --- Logging metadata (no logic impact) ---
-  // Classify valid candidates as face-focused vs context-focused
-  const FACE_ANCHORS = ['face', 'smile', 'grin', 'smirk', 'frown', 'squint', 'expression', 'eyes', 'jaw', 'teeth', 'staring'];
-  let faceFocused = 0;
-  let contextFocused = 0;
-  for (const c of candidates) {
-    const s1 = (c.text.match(/[^.!?]*[.!?]+/g) || [c.text])[0].toLowerCase();
-    if (FACE_ANCHORS.some(kw => s1.includes(kw))) faceFocused++;
-    else contextFocused++;
+  // Try best candidate
+  const best = candidates[0];
+  finalRoast = await mv2PolishAndValidate(best);
+  if (finalRoast) {
+    pickedStructure = best.structure;
+    pickedTarget = best.target;
+    wordCount = finalRoast.split(/\s+/).length;
   }
 
-  // Winner sentence analysis
-  const winnerSents = winner.match(/[^.!?]*[.!?]+/g) || [winner];
-  const winnerS1 = (winnerSents[0] || '').trim().toLowerCase();
-  const winnerS2 = winnerSents.length >= 2 ? winnerSents[1].trim() : '';
-  const wordCount = winner.trim().split(/\s+/).length;
-  const s2WordCount = winnerS2 ? winnerS2.split(/\s+/).length : 0;
-
-  // Detect visual anchor keyword in s1
-  const MEDIUM_EXTRA_VISUAL_LOG = [
-    'lighting', 'shadow', 'dim', 'dark', 'glare', 'flash',
-    'frame', 'crop', 'angle', 'background', 'garage', 'palm',
-    'kitchen', 'room',
-  ];
-  const allVisualLog = [...VISUAL_KEYWORDS, ...MEDIUM_EXTRA_VISUAL_LOG];
-  const anchor = allVisualLog.find(kw => winnerS1.includes(kw)) || 'none';
-  const visualHit = anchor !== 'none';
-
-  // Classify s2 structure pattern
-  const s2Lower = winnerS2.toLowerCase();
-  const SOCIAL_TOKENS = ['everyone', 'nobody', 'people', 'anyone', 'audience', 'room'];
-  const CRINGE_TOKENS = ['cringe', 'embarrass', 'awkward', 'secondhand', 'uncomfortable'];
-  const CONFIDENCE_TOKENS = ['confidence', 'confident', 'swagger', 'bold', 'bravado'];
-  let structure = 'general';
-  if (MEDIUM_EFFORT_WORDS.some(w => s2Lower.includes(w))) structure = 'effort-mismatch';
-  else if (SOCIAL_TOKENS.some(w => s2Lower.includes(w))) structure = 'social-read';
-  else if (CRINGE_TOKENS.some(w => s2Lower.includes(w))) structure = 'cringe';
-  else if (CONFIDENCE_TOKENS.some(w => s2Lower.includes(w))) structure = 'confidence-gap';
-
-  if (process.env.TUNING_MODE) {
-    return {
-      roast: winner,
-      meta: {
-        tier: 'medium',
-        isUsableFace: null,
-        detailPackWeak: null,
-        anchorsCount: null,
-        candidatesCount: typeof numCandidates !== 'undefined' ? numCandidates : null,
-        validCount: typeof candidates !== 'undefined' ? candidates.length : null,
-        rejectedReasons: typeof rejectCounts !== 'undefined' ? Object.keys(rejectCounts) : null,
-        winnerScore: typeof winnerScore !== 'undefined' ? winnerScore : null,
-      },
-    };
+  // Fallback: try 2nd-best candidate
+  if (!finalRoast && candidates.length > 1) {
+    const second = candidates[1];
+    if (isDev) console.log(`[medium-v2] best failed, trying 2nd: tmpl=${second.structure.id}`);
+    finalRoast = await mv2PolishAndValidate(second);
+    if (finalRoast) {
+      pickedStructure = second.structure;
+      pickedTarget = second.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
   }
+
+  // Safe fallback
+  if (!finalRoast) {
+    fallbackUsed = true;
+    finalRoast = MV2_SAFE_FALLBACKS[Math.floor(Math.random() * MV2_SAFE_FALLBACKS.length)];
+    wordCount = finalRoast.split(/\s+/).length;
+    pickedStructure = { id: 'FALLBACK' };
+    pickedTarget = 'fallback';
+    if (isDev) console.log('[medium-v2] all candidates failed, using safeFallback');
+  }
+
+  // Update client state
+  pushMediumClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id);
+  const prevHistory = mediumStructureHistory.get(clientId) || [];
+  mediumStructureHistory.set(clientId, [pickedStructure.id, ...prevHistory].slice(0, 3));
+  pushMediumFamilyHistory(clientId, MV2_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC');
+  pushRecentMedium(finalRoast);
+
+  if (isDev) {
+    console.log(`[medium-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" fallback=${fallbackUsed} words=${wordCount}`);
+    console.log(`[medium-v2] result="${finalRoast}"`);
+  }
+
+  const winnerScore = (!fallbackUsed && best) ? best.wcScore : 0;
+
   return {
-    roast: winner,
+    roast: finalRoast,
     meta: {
-      candidates: numCandidates,
-      valid: candidates.length,
-      rejectCounts,
+      tier: 'medium',
+      structureId: pickedStructure.id,
+      familyId: MV2_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC',
+      target: pickedTarget,
+      wordCount,
+      candidatesCount: MV2_LOCAL_CANDIDATES,
       winnerScore,
       fallbackUsed,
-      anchor,
-      structure,
-      s2words: s2WordCount,
-      wordCount,
-      visualHit,
-      faceFocused,
-      contextFocused,
     },
   };
 }
 
-// --- Mild V2: single-winner candidate pipeline ---
-async function generateMildV2({ imageBase64 }) {
+// --- Mild V2 client state (per-client fatigue tracking) ---
+const mildClientState = new Map();
+const mildStructureHistory = new Map();
+const mildFamilyHistory = new Map();
+
+function getMildClientState(clientId) {
+  if (!mildClientState.has(clientId)) {
+    mildClientState.set(clientId, {
+      recentRoasts: [],
+      recentTargets: [],
+      recentStructures: [],
+    });
+  }
+  return mildClientState.get(clientId);
+}
+
+function pushMildClientRoast(clientId, roast, target, structureId) {
+  const st = getMildClientState(clientId);
+  st.recentRoasts.push(roast);
+  if (st.recentRoasts.length > 10) st.recentRoasts.shift();
+  st.recentTargets.push(target);
+  if (st.recentTargets.length > 6) st.recentTargets.shift();
+  st.recentStructures.push(structureId);
+  if (st.recentStructures.length > 6) st.recentStructures.shift();
+}
+
+function getMildFamilyHistory(clientId) {
+  return mildFamilyHistory.get(clientId) || [];
+}
+
+function pushMildFamilyHistory(clientId, familyId) {
+  const hist = getMildFamilyHistory(clientId);
+  hist.push(familyId);
+  while (hist.length > 3) hist.shift();
+  mildFamilyHistory.set(clientId, hist);
+}
+
+// --- Mild V2 output cleaner (1 sentence, clamp to first sentence) ---
+function mlv2CleanOutput(text) {
+  let out = text.trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/^\*+|\*+$/g, '')
+    .trim();
+  const sents = out.match(/[^.!?]*[.!?]+/g);
+  if (sents && sents.length > 1) {
+    out = sents[0].trim();
+  }
+  if (out && !/[.!?]$/.test(out)) out += '.';
+  return out;
+}
+
+// --- Mild V2 generator (template-based, mirrors Medium architecture) ---
+async function generateMildV2({ imageBase64, clientId = 'anon' }) {
   const isDev = process.env.NODE_ENV !== 'production';
-  const config = INTENSITY_CONFIG.mild;
-  const numCandidates = config.candidates || 8;
-  const rejectCounts = {};
-  const seen = new Set();
-  const fallbacks = FALLBACKS.mild;
+  const state = getMildClientState(clientId);
+  const recentFamilies = getMildFamilyHistory(clientId);
+  const structHistory = mildStructureHistory.get(clientId) || [];
+  let fallbackUsed = false;
+  let pickedStructure = null;
+  let pickedTarget = null;
+  let finalRoast = null;
+  let wordCount = 0;
 
-  // Style diversity: rotate hints per request
-  const styleHint = ' ' + MILD_STYLE_HINTS[Math.floor(Math.random() * MILD_STYLE_HINTS.length)];
-
-  // Avoid block: penalize repetition of recent outputs
-  const avoidBlock = recentMildRoasts.length > 0
-    ? `\n\nDO NOT REPEAT OR PARAPHRASE ANY OF THESE:\n${recentMildRoasts.slice(-15).map(r => `- ${r}`).join('\n')}`
-    : '';
-
-  // System message
-  const sysMsg = `You are a lighthearted roast comedian. Write EXACTLY one sentence about this photo. The sentence MUST end with a period. No second sentence. 8–14 words total. Reference ONE visible detail (outfit, hair, pose, angle, background, expression, lighting). Tone: gentle, playful, friendly tease — shareable without offense. No compliments or encouragement. If it reads supportive, rewrite as a light tease. NEVER use "you look like" or "looks like". No vibe/energy/aura. No questions. No advice or commands. No emojis. No quote marks. No harsh or bleak language. Plain text only — no JSON, no brackets, no labels.${styleHint}${avoidBlock}`;
-
-  // User prompt
-  const userPrompt = `Look at this selfie and write ONE gentle roast. Write EXACTLY one sentence. The sentence MUST end with a period. No second sentence. 8–14 words total. Reference something visible (outfit, hair, pose, angle, background, expression, lighting). Light and playful — "haha okay fair" energy. No compliments or encouragement. If it reads supportive, rewrite as a light tease. Plain text only — no JSON, no formatting, no labels, no numbering.`;
-
-  const imageContent = [
-    { type: 'input_text', text: userPrompt },
-    { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-  ];
-
-  const buildCallOpts = () => {
-    const opts = {
-      model: 'gpt-4o',
-      input: [
-        { role: 'system', content: sysMsg },
-        { role: 'user', content: imageContent },
-      ],
-    };
-    if (config.maxTokens) opts.max_output_tokens = config.maxTokens;
-    if (config.temperature != null) opts.temperature = config.temperature;
-    if (config.presence_penalty != null) opts.presence_penalty = config.presence_penalty;
-    if (config.frequency_penalty != null) opts.frequency_penalty = config.frequency_penalty;
-    if (config.top_p != null) opts.top_p = config.top_p;
-    return opts;
-  };
-
-  // Generate N candidates in parallel — one plain-text roast per call
-  const calls = Array.from({ length: numCandidates }, () =>
-    openai.responses.create(buildCallOpts())
-      .then(r => r.output_text)
-      .catch(() => null)
-  );
-  const outputs = await Promise.all(calls);
-
+  // 1. Build local skeleton candidates and score them
   const candidates = [];
-  for (const raw of outputs) {
-    if (!raw) continue;
+  const batchRecentStructures = [...state.recentStructures];
+  const batchRecentTargets = [...state.recentTargets];
 
-    // Clean: strip code fences, JSON wrapping
-    let text = raw.trim()
-      .replace(/^```[\s\S]*?```$/g, '')
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/```$/, '')
-      .trim();
+  for (let i = 0; i < MLV2_LOCAL_CANDIDATES; i++) {
+    // Pick structure with avoidance + family fatigue reroll
+    let structure = nv2SelectWithAvoidance(
+      MLV2_STRUCTURE_TEMPLATES, batchRecentStructures, NV2_MAX_SELECT_TRIES
+    );
+    let familyId = MLV2_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
 
-    // Salvage JSON-wrapped output
-    if (text.startsWith('{') || text.startsWith('[')) {
-      const salvaged = extractRoastText(text);
-      if (salvaged) {
-        text = salvaged;
-      } else {
-        rejectCounts['json-unwrap-fail'] = (rejectCounts['json-unwrap-fail'] || 0) + 1;
-        continue;
+    if (recentFamilies.includes(familyId)) {
+      const altTemplates = MLV2_STRUCTURE_TEMPLATES.filter(t => {
+        const fam = MLV2_TEMPLATE_FAMILY[t.id] || 'FAMILY_MISC';
+        return fam !== familyId;
+      });
+      if (altTemplates.length > 0) {
+        structure = nv2SelectWithAvoidance(
+          altTemplates, batchRecentStructures, NV2_MAX_SELECT_TRIES
+        );
+        familyId = MLV2_TEMPLATE_FAMILY[structure.id] || 'FAMILY_MISC';
+      }
+    }
+    batchRecentStructures.push(structure.id);
+    if (batchRecentStructures.length > 6) batchRecentStructures.shift();
+
+    const target = nv2SelectWithAvoidance(
+      MLV2_TARGET_POOL, batchRecentTargets, NV2_MAX_SELECT_TRIES
+    );
+    batchRecentTargets.push(target);
+    if (batchRecentTargets.length > 6) batchRecentTargets.shift();
+
+    const observation = MLV2_OBSERVATION_POOL[Math.floor(Math.random() * MLV2_OBSERVATION_POOL.length)];
+
+    // Plural detection for grammar agreement
+    const mlv2Plurals = new Set(['glasses', 'eyebrows']);
+    const isPlural = mlv2Plurals.has(target) || (target.endsWith('s') && !target.endsWith('ss'));
+
+    // Plural verb agreement in observation: "is trying" → "are trying"
+    let filledObs = observation;
+    if (isPlural) {
+      filledObs = filledObs
+        .replace(/^is /, 'are ')
+        .replace(/^was /, 'were ')
+        .replace(/^has /, 'have ')
+        .replace(/ is not/, ' are not')
+        .replace(/ its /, ' their ');
+    }
+
+    // Select singular or plural template variant
+    const tplStr = Array.isArray(structure.tpl) ? structure.tpl[isPlural ? 1 : 0] : structure.tpl;
+
+    const skeleton = tplStr
+      .replace('{TARGET}', target)
+      .replace('{OBSERVATION}', filledObs);
+
+    const wc = skeleton.split(/\s+/).length;
+
+    // Scoring: prefer 9–11 words for a single-sentence Mild roast
+    let wcScore = 0;
+    const scoreBreakdown = [];
+    if (wc >= 9 && wc <= 11) { wcScore += 16; scoreBreakdown.push('wcSweet+16'); }
+    if (wc >= 8 && wc <= 13) { wcScore += 6; scoreBreakdown.push('wcOk+6'); }
+    if (wc <= 6) { wcScore -= 10; scoreBreakdown.push('wcShort-10'); }
+    if (wc > 13) { wcScore -= 8; scoreBreakdown.push('wcLong-8'); }
+
+    // Structure fatigue
+    if (structHistory.includes(structure.id)) { wcScore -= 10; scoreBreakdown.push('structFatigue-10'); }
+
+    // Family fatigue
+    const lastFam = recentFamilies.length > 0 ? recentFamilies[recentFamilies.length - 1] : null;
+    if (lastFam && lastFam === familyId) { wcScore -= 6; scoreBreakdown.push('familyFatigue-6'); }
+
+    // Target fatigue
+    if (state.recentTargets.includes(target)) { wcScore -= 8; scoreBreakdown.push('targetFatigue-8'); }
+
+    candidates.push({ structure, familyId, target, observation: filledObs, skeleton, wcScore, wordCount: wc, scoreBreakdown });
+  }
+
+  // 2. Sort: highest wcScore, tie-break by sweet-spot word count
+  candidates.sort((a, b) => {
+    if (b.wcScore !== a.wcScore) return b.wcScore - a.wcScore;
+    const aSweet = (a.wordCount >= 9 && a.wordCount <= 11) ? 1 : 0;
+    const bSweet = (b.wordCount >= 9 && b.wordCount <= 11) ? 1 : 0;
+    return bSweet - aSweet;
+  });
+
+  if (isDev) {
+    const top3 = candidates.slice(0, 3).map((c, i) =>
+      `#${i + 1} tmpl=${c.structure.id} fam=${c.familyId} wc=${c.wordCount} score=${c.wcScore} [${(c.scoreBreakdown || []).join(',')}]`
+    );
+    console.log(`[mild-v2] skeletons=${candidates.length} top3: ${top3.join(' | ')}`);
+  }
+
+  // 3. Polish best candidate via single LLM call (production only)
+  async function mlv2PolishAndValidate(candidate) {
+    let polished = candidate.skeleton;
+    if (!process.env.TUNING_MODE) {
+      const polishPrompt = `Rewrite this roast to sound natural and conversational. Keep it gentle and playful — a "haha okay fair" not an insult. Do NOT add new ideas or change the target. Keep it as 1 sentence. 9–11 words preferred, max 13. Output ONLY the rewritten roast.\n\nRoast: "${candidate.skeleton}"`;
+      try {
+        const polishResp = await openai.responses.create({
+          model: 'gpt-4o',
+          input: [
+            { role: 'system', content: 'You are a gentle roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Playful and light, never harsh. 9–11 words preferred.' },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: polishPrompt },
+                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+              ],
+            },
+          ],
+          max_output_tokens: 50,
+          temperature: 0.8,
+          top_p: 0.9,
+        });
+        if (polishResp.output_text) polished = polishResp.output_text;
+      } catch (err) {
+        if (isDev) console.log(`[mild-v2] polish error: ${err.message}`);
       }
     }
 
-    // Strip ALL quote characters (straight + curly)
-    text = text.replace(/["'\u201C\u201D\u2018\u2019]/g, '').replace(/\s+/g, ' ').trim();
-
-    // Repair common contractions broken by quote stripping
-    const CONTRACTION_FIXES = [
-      [/\bcant\b/gi, "can't"], [/\bwont\b/gi, "won't"], [/\bdont\b/gi, "don't"],
-      [/\bdoesnt\b/gi, "doesn't"], [/\bdidnt\b/gi, "didn't"], [/\bcouldnt\b/gi, "couldn't"],
-      [/\bwouldnt\b/gi, "wouldn't"], [/\bisnt\b/gi, "isn't"], [/\barent\b/gi, "aren't"],
-      [/\byoure\b/gi, "you're"], [/\byoull\b/gi, "you'll"], [/\byouve\b/gi, "you've"],
-      [/\bive\b/gi, "I've"], [/\bim\b/gi, "I'm"],
-      [/\bthats\b/gi, "that's"], [/\bwhats\b/gi, "what's"], [/\btheres\b/gi, "there's"],
-      [/\bits like\b/gi, "it's like"], [/\bits just\b/gi, "it's just"],
-      [/\bits almost\b/gi, "it's almost"], [/\bits as if\b/gi, "it's as if"],
-    ];
-    for (const [re, fix] of CONTRACTION_FIXES) {
-      text = text.replace(re, fix);
+    let result = mlv2CleanOutput(polished);
+    if (!result || result.length < 10) return null;
+    if (nv2HasBannedPatterns(result)) {
+      if (isDev) console.log(`[mild-v2] validation fail: bannedPattern text="${result}"`);
+      return null;
     }
-
-    // Clamp to 1 sentence, 14 words
-    let clamped = clampRoast(text, config.maxSentences, config.maxChars, config.maxWords);
-    if (!clamped || clamped.length < 8) continue;
-    const sents = clamped.match(/[^.!?]*[.!?]+/g);
-    if (sents && sents.length > 1) clamped = sents[0].trim();
-    const words = clamped.trim().split(/\s+/);
-    if (words.length > 14) clamped = words.slice(0, 14).join(' ').trim();
-    if (!/[.!?]$/.test(clamped)) clamped += '.';
-    if (!clamped || clamped.length < 8) continue;
-
-    // Validate
-    const v = validateRoast(clamped, 'mild');
-    if (!v.valid) {
-      for (const reason of v.reasons.slice(0, 2)) {
-        rejectCounts[reason] = (rejectCounts[reason] || 0) + 1;
-      }
-      continue;
+    if (!isPlaySafe(result)) {
+      if (isDev) console.log(`[mild-v2] validation fail: safety text="${result}"`);
+      return null;
     }
-
-    // Dedupe within request
-    const normKey = normalizeRoast(clamped);
-    if (seen.has(normKey)) continue;
-    seen.add(normKey);
-
-    // Score
-    const score = scoreRoast(clamped, 'mild');
-    candidates.push({ text: clamped, score });
+    return result;
   }
 
-  // Sort by score descending, pick ONE winner
-  candidates.sort((a, b) => b.score - a.score);
-  const fallbackUsed = candidates.length === 0;
-  const winner = fallbackUsed
-    ? fallbacks[Math.floor(Math.random() * fallbacks.length)]
-    : candidates[0].text;
-  const winnerScore = fallbackUsed ? 0 : candidates[0].score;
-
-  if (process.env.TUNING_MODE) {
-    return {
-      roast: winner,
-      meta: {
-        tier: 'mild',
-        isUsableFace: null,
-        detailPackWeak: null,
-        anchorsCount: null,
-        candidatesCount: typeof numCandidates !== 'undefined' ? numCandidates : null,
-        validCount: typeof candidates !== 'undefined' ? candidates.length : null,
-        rejectedReasons: typeof rejectCounts !== 'undefined' ? Object.keys(rejectCounts) : null,
-        winnerScore: typeof winnerScore !== 'undefined' ? winnerScore : null,
-      },
-    };
+  // Try best candidate
+  const best = candidates[0];
+  finalRoast = await mlv2PolishAndValidate(best);
+  if (finalRoast) {
+    pickedStructure = best.structure;
+    pickedTarget = best.target;
+    wordCount = finalRoast.split(/\s+/).length;
   }
+
+  // Fallback: try 2nd-best candidate
+  if (!finalRoast && candidates.length > 1) {
+    const second = candidates[1];
+    if (isDev) console.log(`[mild-v2] best failed, trying 2nd: tmpl=${second.structure.id}`);
+    finalRoast = await mlv2PolishAndValidate(second);
+    if (finalRoast) {
+      pickedStructure = second.structure;
+      pickedTarget = second.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
+  }
+
+  // Safe fallback
+  if (!finalRoast) {
+    fallbackUsed = true;
+    finalRoast = MLV2_SAFE_FALLBACKS[Math.floor(Math.random() * MLV2_SAFE_FALLBACKS.length)];
+    wordCount = finalRoast.split(/\s+/).length;
+    pickedStructure = { id: 'FALLBACK' };
+    pickedTarget = 'fallback';
+    if (isDev) console.log('[mild-v2] all candidates failed, using safeFallback');
+  }
+
+  // Update client state
+  pushMildClientRoast(clientId, finalRoast, pickedTarget, pickedStructure.id);
+  const prevHistory = mildStructureHistory.get(clientId) || [];
+  mildStructureHistory.set(clientId, [pickedStructure.id, ...prevHistory].slice(0, 3));
+  pushMildFamilyHistory(clientId, MLV2_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC');
+  pushRecentMild(finalRoast);
+
+  if (isDev) {
+    console.log(`[mild-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" fallback=${fallbackUsed} words=${wordCount}`);
+    console.log(`[mild-v2] result="${finalRoast}"`);
+  }
+
+  const winnerScore = (!fallbackUsed && best) ? best.wcScore : 0;
+
   return {
-    roast: winner,
+    roast: finalRoast,
     meta: {
-      candidates: numCandidates,
-      valid: candidates.length,
-      rejectCounts,
+      tier: 'mild',
+      structureId: pickedStructure.id,
+      familyId: MLV2_TEMPLATE_FAMILY[pickedStructure.id] || 'FAMILY_MISC',
+      target: pickedTarget,
+      wordCount,
+      candidatesCount: MLV2_LOCAL_CANDIDATES,
       winnerScore,
       fallbackUsed,
     },
@@ -6061,30 +6457,28 @@ app.post('/api/roast', async (req, res) => {
       return res.json({ roasts });
     }
 
-    // --- Mild V2 intercept: single-winner candidate pipeline ---
+    // --- Mild V2 intercept: template-based candidate pipeline ---
     if (tierName === 'mild') {
-      const { roast, meta } = await generateMildV2({ imageBase64 });
+      const mlv2ClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
+      const { roast, meta } = await generateMildV2({ imageBase64, clientId: mlv2ClientId });
       roasts = [roast];
       themes = [];
-      pushRecentMild(roast);
       if (isDev) {
-        console.log(`[mild-v2] candidates=${meta.candidates} valid=${meta.valid} rejected=${JSON.stringify(meta.rejectCounts)}`);
-        console.log(`[mild-v2] winner score=${meta.winnerScore}${meta.fallbackUsed ? ' (fallback)' : ''} text="${roast}"`);
+        console.log(`[mild-v2] clientId=${mlv2ClientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} score=${meta.winnerScore}`);
+        console.log(`[mild-v2] result="${roast}"`);
       }
       return res.json({ roasts });
     }
 
-    // --- Medium V2 intercept: single-winner candidate pipeline ---
+    // --- Medium V2 intercept: template-based candidate pipeline ---
     if (tierName === 'medium') {
-      const { roast, meta } = await generateMediumV2({ imageBase64 });
+      const mv2ClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
+      const { roast, meta } = await generateMediumV2({ imageBase64, clientId: mv2ClientId });
       roasts = [roast];
       themes = [];
-      pushRecentMedium(roast);
       if (isDev) {
-        console.log(`[medium-v2] candidates=${meta.candidates} valid=${meta.valid} rejected=${JSON.stringify(meta.rejectCounts)}`);
-        console.log(`[medium-v2] composition face=${meta.faceFocused} context=${meta.contextFocused}`);
-        console.log(`[medium-v2] winner score=${meta.winnerScore}${meta.fallbackUsed ? ' (fallback)' : ''} text="${roast}"`);
-        console.log(`[medium-v2] anchor=${meta.anchor} structure=${meta.structure} s2words=${meta.s2words} wordCount=${meta.wordCount} visualHit=${meta.visualHit}`);
+        console.log(`[medium-v2] clientId=${mv2ClientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} score=${meta.winnerScore}`);
+        console.log(`[medium-v2] result="${roast}"`);
       }
       return res.json({ roasts });
     }
@@ -6651,4 +7045,4 @@ if (!process.env.TUNING_MODE) {
   });
 }
 
-export { generateNuclearV2, generateSavageV2, generateNuclearSv, nv2ExtractSceneNouns, extractSafeSelfieTags };
+export { generateNuclearV2, generateSavageV2, generateNuclearSv, generateMediumV2, generateMildV2, nv2ExtractSceneNouns, extractSafeSelfieTags };

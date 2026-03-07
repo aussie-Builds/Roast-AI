@@ -11,7 +11,8 @@ console.log('[tune] OPENAI_API_KEY present=', !!process.env.OPENAI_API_KEY, 'len
  * Usage:
  *   npm run tune:nuclear                    (default, Nuclear tier, v2 engine)
  *   npm run tune:savage                     (Savage tier)
- *   node tools/tune_nuclear.js --tier savage
+ *   node tools/tune_nuclear.js --tier medium (Medium tier)
+ *   node tools/tune_nuclear.js --tier mild  (Mild tier)
  *   node tools/tune_nuclear.js --engine=sv  (Nuclear-SV engine)
  *   node tools/tune_nuclear.js --engine=v2  (Nuclear-V2 engine, default)
  *
@@ -29,7 +30,7 @@ const { pathToFileURL } = require('node:url');
 // ---------- CLI args ----------
 
 const tierArg = process.argv.find((a, i) => i > 0 && process.argv[i - 1] === '--tier') || 'nuclear';
-const tier = ['nuclear', 'savage'].includes(tierArg) ? tierArg : 'nuclear';
+const tier = ['nuclear', 'savage', 'medium', 'mild'].includes(tierArg) ? tierArg : 'nuclear';
 
 // --engine=sv | --engine=v2  (only applies when tier=nuclear)
 const engineMatch = process.argv.find(a => /^--engine=/.test(a));
@@ -148,6 +149,24 @@ function savageSpiceScore(text) {
   return score;
 }
 
+const MILD_VISUAL_ANCHORS = /\b(smile|angle|expression|pose|background|lighting|outfit|hair|stance|crop|tilt|grin|squint|shirt|hoodie|glasses|hat|collar|eyebrows|jacket|shadow|posture|stare)\b/i;
+const MILD_HARSH_RE = /\b(pathetic|worthless|disgusting|hideous|ugly|repulsive|loser|failure|disaster|hopeless|tragic|depressing|nobody cares)\b/i;
+
+function mildQualityScore(text) {
+  const wc = countWords(text);
+  let score = 0;
+  // Sweet spot: 9–11 words
+  if (wc >= 9 && wc <= 11) score += 18;
+  else if (wc === 8 || wc === 12) score += 10;
+  else if (wc <= 7) score -= 10;
+  else if (wc > 13) score -= 8;
+  // Visual anchoring
+  if (MILD_VISUAL_ANCHORS.test(text)) score += 6;
+  // Harsh penalty
+  if (MILD_HARSH_RE.test(text)) score -= 8;
+  return score;
+}
+
 function dupRate(texts) {
   let dupPairs = 0;
   let totalPairs = 0;
@@ -185,7 +204,7 @@ async function main() {
 
   // Import server module (ESM) — TUNING_MODE prevents app.listen
   const serverPath = pathToFileURL(path.resolve('server/index.js')).href;
-  const { generateNuclearV2, generateSavageV2, generateNuclearSv, nv2ExtractSceneNouns, extractSafeSelfieTags } = await import(serverPath);
+  const { generateNuclearV2, generateSavageV2, generateNuclearSv, generateMediumV2, generateMildV2, nv2ExtractSceneNouns, extractSafeSelfieTags } = await import(serverPath);
 
   const allResults = [];
 
@@ -239,11 +258,20 @@ async function main() {
     const imageResults = [];
 
     for (let i = 0; i < RUNS_PER_IMAGE; i++) {
-      const engineTag = tier === 'nuclear' ? `nuclear-${engine}` : 'savage-v2';
+      const engineTag = tier === 'nuclear' ? `nuclear-${engine}` : tier === 'mild' ? 'mild-v2' : tier === 'medium' ? 'medium-v2' : 'savage-v2';
       process.stdout.write(`  Run ${i + 1}/${RUNS_PER_IMAGE} [${engineTag}] ... `);
 
       let result;
-      if (tier === 'savage') {
+      if (tier === 'mild') {
+        result = await generateMildV2({
+          imageBase64: imageDataUrl,
+          clientId: 'tuning',
+        });
+      } else if (tier === 'medium') {
+        result = await generateMediumV2({
+          imageBase64: imageDataUrl,
+        });
+      } else if (tier === 'savage') {
         result = await generateSavageV2({
           clientId: 'tuning',
           imageBase64: imageDataUrl,
@@ -277,6 +305,26 @@ async function main() {
             wordCount: meta.wordCount,
             fallbackUsed: meta.fallbackUsed,
             totalTime: meta.totalTime != null ? `${meta.totalTime}ms` : null,
+          });
+        } else if (meta.tier === 'mild') {
+          // Mild-V2 template meta
+          console.log(`[mild-v2 meta]`, {
+            structureId: meta.structureId,
+            familyId: meta.familyId,
+            target: meta.target,
+            wordCount: meta.wordCount,
+            winnerScore: meta.winnerScore,
+            fallbackUsed: meta.fallbackUsed,
+          });
+        } else if (meta.tier === 'medium') {
+          // Medium-V2 template meta
+          console.log(`[medium-v2 meta]`, {
+            structureId: meta.structureId,
+            familyId: meta.familyId,
+            target: meta.target,
+            wordCount: meta.wordCount,
+            winnerScore: meta.winnerScore,
+            fallbackUsed: meta.fallbackUsed,
           });
         } else {
           // Nuclear-V2 or Savage meta
@@ -329,13 +377,13 @@ async function main() {
   const total = allEntries.length;
   const allTexts = allEntries.map(e => e.text);
 
-  const tierLabel = tier === 'nuclear' ? `Nuclear (${engine === 'sv' ? 'nuclear-sv' : 'nuclear-v2'})` : 'Savage';
+  const tierLabel = tier === 'nuclear' ? `Nuclear (${engine === 'sv' ? 'nuclear-sv' : 'nuclear-v2'})` : tier === 'mild' ? 'Mild' : tier === 'medium' ? 'Medium' : 'Savage';
 
   console.log('\n==========================');
   console.log(`${tierLabel} Tuning Summary`);
   console.log('==========================\n');
 
-  console.log(`Engine: ${tier === 'nuclear' ? `nuclear-${engine}` : 'savage-v2'}`);
+  console.log(`Engine: ${tier === 'nuclear' ? `nuclear-${engine}` : tier === 'mild' ? 'mild-v2' : tier === 'medium' ? 'medium-v2' : 'savage-v2'}`);
   console.log(`Images tested: ${allResults.length}`);
   console.log(`Total runs: ${total}\n`);
 
@@ -483,6 +531,44 @@ async function main() {
       }
       const famStr = Object.entries(famCounts).map(([k, v]) => `${k}=${v}`).join(' ');
       console.log(`  families: ${famStr}`);
+    }
+    if (tier === 'mild') {
+      const scored = results.map(r => ({
+        text: r.text,
+        words: r.words,
+        score: mildQualityScore(r.text),
+      })).sort((a, b) => b.score - a.score);
+
+      const best = scored[0];
+      console.log(`  best: "${best.text}" (score=${best.score} words=${best.words})`);
+
+      const MLV2_FALLBACK_RE = /^(that angle is doing|the lighting showed up|something about this photo|the background is minding|that pose came with)/i;
+      const ascending = [...scored].reverse();
+      const worst = ascending.find(r => r.text && !MLV2_FALLBACK_RE.test(r.text)) || ascending[0];
+      console.log(`  worst: "${worst.text}" (score=${worst.score} words=${worst.words})`);
+
+      // Family distribution from meta
+      const famCounts = {};
+      for (const r of results) {
+        const key = (r.meta && r.meta.familyId) ? r.meta.familyId.replace('FAMILY_', '') : 'UNKNOWN';
+        famCounts[key] = (famCounts[key] || 0) + 1;
+      }
+      const famStr = Object.entries(famCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(' ');
+      console.log(`  families: ${famStr}`);
+    }
+    if (tier === 'medium') {
+      const scored = results.map(r => ({
+        text: r.text,
+        words: r.words,
+        score: savageQualityScore(r.text),
+      })).sort((a, b) => b.score - a.score);
+
+      const best = scored[0];
+      console.log(`  best: "${best.text}" (score=${best.score} words=${best.words})`);
+
+      const ascending = [...scored].reverse();
+      const worst = ascending[0];
+      console.log(`  worst: "${worst.text}" (score=${worst.score} words=${worst.words})`);
     }
   }
 }
