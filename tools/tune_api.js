@@ -5,10 +5,13 @@
  * Batch-tests POST /api/roast-v3 with real images over HTTP.
  *
  * Usage:
- *   node tools/tune_api.js                        (all tiers, 5 passes)
- *   node tools/tune_api.js --tier nuclear          (single tier)
- *   node tools/tune_api.js --passes 10             (10 passes per image)
- *   node tools/tune_api.js --url http://host:3000  (custom server)
+ *   node tools/tune_api.js                              (all tiers, default persona, 5 passes)
+ *   node tools/tune_api.js --tier nuclear                (single tier)
+ *   node tools/tune_api.js --persona butler              (single persona)
+ *   node tools/tune_api.js --persona all                 (all personas)
+ *   node tools/tune_api.js --tier savage --persona all   (savage x all personas)
+ *   node tools/tune_api.js --passes 3                    (3 passes per combo)
+ *   node tools/tune_api.js --url http://host:3000        (custom server)
  *
  * Requires: images in ./test_images/
  */
@@ -25,15 +28,23 @@ function flag(name, fallback) {
 }
 
 const TIER_FILTER = flag('tier', null);
+const PERSONA_FILTER = flag('persona', null);
 const PASSES = parseInt(flag('passes', '5'), 10);
 const BASE_URL = flag('url', 'http://localhost:3000');
 const ENDPOINT = `${BASE_URL}/api/roast-v3`;
 
 const ALL_TIERS = ['mild', 'medium', 'savage', 'nuclear'];
+const ALL_PERSONAS = ['default', 'butler', 'mean_girl', 'gym_bro', 'anime_villain', 'therapist'];
+
 const tiers = TIER_FILTER ? [TIER_FILTER] : ALL_TIERS;
+const personas = PERSONA_FILTER === 'all' ? ALL_PERSONAS : PERSONA_FILTER ? [PERSONA_FILTER] : ['default'];
 
 if (TIER_FILTER && !ALL_TIERS.includes(TIER_FILTER)) {
   console.error(`Invalid tier: ${TIER_FILTER}. Must be one of: ${ALL_TIERS.join(', ')}`);
+  process.exit(1);
+}
+if (PERSONA_FILTER && PERSONA_FILTER !== 'all' && !ALL_PERSONAS.includes(PERSONA_FILTER)) {
+  console.error(`Invalid persona: ${PERSONA_FILTER}. Must be one of: all, ${ALL_PERSONAS.join(', ')}`);
   process.exit(1);
 }
 
@@ -75,15 +86,15 @@ for (const file of imageFiles) {
 }
 
 // ---------- Run plan ----------
-const totalRuns = imageFiles.length * tiers.length * PASSES;
+const totalRuns = imageFiles.length * tiers.length * personas.length * PASSES;
 
 // ---------- API call ----------
-async function callRoastV3(imageBase64, level) {
+async function callRoastV3(imageBase64, level, persona) {
   const t0 = Date.now();
   const res = await fetch(ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ imageBase64, level }),
+    body: JSON.stringify({ imageBase64, level, persona }),
   });
   const elapsed = Date.now() - t0;
   const data = await res.json();
@@ -100,6 +111,7 @@ async function main() {
   console.log(`Endpoint:  ${ENDPOINT}`);
   console.log(`Images:    ${imageFiles.length}`);
   console.log(`Tiers:     ${tiers.join(', ')}`);
+  console.log(`Personas:  ${personas.join(', ')}`);
   console.log(`Passes:    ${PASSES}`);
   console.log(`Total runs: ${totalRuns}\n`);
 
@@ -108,31 +120,41 @@ async function main() {
   let fallbackCount = 0;
   let errorCount = 0;
   const rejectCounts = {};
+  const personaStats = {};
 
   for (const file of imageFiles) {
     const base64 = imageData.get(file);
 
     for (const tier of tiers) {
-      for (let pass = 1; pass <= PASSES; pass++) {
-        completed++;
-        const progress = `[${completed}/${totalRuns}]`;
+      for (const p of personas) {
+        for (let pass = 1; pass <= PASSES; pass++) {
+          completed++;
+          const progress = `[${completed}/${totalRuns}]`;
+          const pLabel = p === 'default' ? '' : `  Persona: ${p}`;
 
-        try {
-          const { roast, elapsed, isFallback, rejectReason } = await callRoastV3(base64, tier);
-          times.push(elapsed);
-          if (isFallback) {
-            fallbackCount++;
-            const key = rejectReason || 'unknown';
-            rejectCounts[key] = (rejectCounts[key] || 0) + 1;
+          try {
+            const { roast, elapsed, isFallback, rejectReason } = await callRoastV3(base64, tier, p);
+            times.push(elapsed);
+
+            // Per-persona stats
+            if (!personaStats[p]) personaStats[p] = { times: [], fallbacks: 0 };
+            personaStats[p].times.push(elapsed);
+
+            if (isFallback) {
+              fallbackCount++;
+              personaStats[p].fallbacks++;
+              const key = rejectReason || 'unknown';
+              rejectCounts[key] = (rejectCounts[key] || 0) + 1;
+            }
+
+            const fb = isFallback ? ` [FALLBACK: ${rejectReason || 'unknown'}]` : '';
+            console.log(`${progress} Image: ${file}  Level: ${tier}${pLabel}  Pass: ${pass}/${PASSES}  Time: ${elapsed}ms${fb}`);
+            console.log(`  Roast: "${roast}"\n`);
+          } catch (err) {
+            errorCount++;
+            console.log(`${progress} Image: ${file}  Level: ${tier}${pLabel}  Pass: ${pass}/${PASSES}  ERROR`);
+            console.log(`  ${err.message}\n`);
           }
-
-          const fb = isFallback ? ` [FALLBACK: ${rejectReason || 'unknown'}]` : '';
-          console.log(`${progress} Image: ${file}  Level: ${tier}  Pass: ${pass}/${PASSES}  Time: ${elapsed}ms${fb}`);
-          console.log(`  Roast: "${roast}"\n`);
-        } catch (err) {
-          errorCount++;
-          console.log(`${progress} Image: ${file}  Level: ${tier}  Pass: ${pass}/${PASSES}  ERROR`);
-          console.log(`  ${err.message}\n`);
         }
       }
     }
@@ -164,6 +186,19 @@ async function main() {
       console.log(`\nReject reasons:`);
       for (const [reason, count] of reasons) {
         console.log(`  - ${reason}: ${count}`);
+      }
+    }
+
+    // Per-persona breakdown (only if testing multiple personas)
+    if (personas.length > 1) {
+      console.log(`\nPer-persona breakdown:`);
+      for (const p of personas) {
+        const ps = personaStats[p];
+        if (!ps || ps.times.length === 0) continue;
+        const pSorted = [...ps.times].sort((a, b) => a - b);
+        const pAvg = Math.round(pSorted.reduce((a, b) => a + b, 0) / pSorted.length);
+        const pFbRate = ((ps.fallbacks / ps.times.length) * 100).toFixed(1);
+        console.log(`  ${p}: avg=${pAvg}ms  fallback=${pFbRate}%  n=${ps.times.length}`);
       }
     }
   } else {

@@ -22,6 +22,18 @@ import { canRoast, recordRoast } from '@/utils/rateLimiter';
 import UpgradeModal from '@/components/UpgradeModal';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
+type Persona = 'default' | 'butler' | 'mean_girl' | 'gym_bro' | 'anime_villain' | 'therapist';
+
+const PERSONA_LABELS: Record<Persona, string> = {
+  default: 'Default',
+  butler: 'Butler',
+  mean_girl: 'Mean Girl',
+  gym_bro: 'Gym Bro',
+  anime_villain: 'Villain',
+  therapist: 'Therapist',
+};
+
+const PERSONAS = Object.keys(PERSONA_LABELS) as Persona[];
 
 const TIER_COLORS: Record<RoastLevel, string> = {
   mild: '#4DA6FF',
@@ -116,6 +128,7 @@ export default function PreviewScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<RoastLevel>('medium');
+  const [persona, setPersona] = useState<Persona>('default');
   const [shareMode, setShareMode] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
@@ -207,7 +220,7 @@ export default function PreviewScreen() {
       const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, level }),
+        body: JSON.stringify({ imageBase64: base64, level, persona }),
       });
 
       const data = await response.json();
@@ -271,7 +284,7 @@ export default function PreviewScreen() {
       const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, level: nextLevel }),
+        body: JSON.stringify({ imageBase64: base64, level: nextLevel, persona }),
       });
 
       const data = await response.json();
@@ -455,6 +468,22 @@ export default function PreviewScreen() {
               </Pressable>
             ))}
           </View>
+          <View style={styles.personaRow}>
+            {PERSONAS.map((p) => (
+              <Pressable
+                key={p}
+                style={[
+                  styles.personaButton,
+                  persona === p && styles.personaButtonActive,
+                ]}
+                onPress={() => setPersona(p)}
+              >
+                <Text style={[styles.personaButtonText, persona === p && styles.personaButtonTextActive]}>
+                  {PERSONA_LABELS[p]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
         </View>
       )}
 
@@ -608,6 +637,34 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   levelButtonTextActive: {
+    color: '#fff',
+  },
+
+  // Persona selector
+  personaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+  },
+  personaButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  personaButtonActive: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderColor: 'rgba(255,255,255,0.7)',
+  },
+  personaButtonText: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  personaButtonTextActive: {
     color: '#fff',
   },
 

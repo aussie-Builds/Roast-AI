@@ -7115,6 +7115,17 @@ app.post('/api/roast', async (req, res) => {
 // ========================================================
 // POST /api/roast-v3 — single-call, no pipeline
 // ========================================================
+const V3_PERSONAS = {
+  default: '',
+  butler: 'Voice: aristocratic British butler — politely condescending, dry, restrained. Vary your opener every time — draw from the tone of words like "Evidently," "Remarkable," "Curious," "How unfortunate," "One does wonder," but never repeat the same opener twice. One simple clause — no semicolons, no compound sentences. 8–14 words max.',
+  mean_girl: 'Voice: petty mean girl — sarcastic, socially cutting, dripping with fake concern. Use gossip-style phrasing.',
+  gym_bro: 'Voice: gym bro — bro slang, mocking motivational tone, creatine-fueled energy. Use fitness metaphors.',
+  anime_villain: 'Voice: anime villain — dramatic, theatrical, overconfident monologue energy. Use grandiose phrasing.',
+  therapist: 'Voice: therapist making a calm observation. Start with "Interesting." or "Fascinating." or "I notice..." then one short clinical observation about what you see. Deadpan, analytical, no jokes. 8–12 words after the opener.',
+};
+
+const V3_VALID_PERSONAS = Object.keys(V3_PERSONAS);
+
 const V3_TONES = {
   mild:    [
     'Tone: light, playful teasing — like friends roasting each other. Witty but never cruel.',
@@ -7221,8 +7232,9 @@ function v3Validate(text, tier) {
 app.post('/api/roast-v3', async (req, res) => {
   const t0 = Date.now();
   try {
-    const { imageBase64, level } = req.body || {};
+    const { imageBase64, level, persona: rawPersona } = req.body || {};
     const tier = ['mild', 'medium', 'savage', 'nuclear'].includes(level) ? level : 'medium';
+    const persona = V3_VALID_PERSONAS.includes(rawPersona) ? rawPersona : 'default';
 
     if (!imageBase64) {
       return res.status(400).json({ error: 'missing_image', message: 'imageBase64 is required.' });
@@ -7244,7 +7256,8 @@ app.post('/api/roast-v3', async (req, res) => {
 
     console.log(`[roast-v3] image originalKB=${(originalBytes / 1024).toFixed(0)} compressedKB=${(compressedBytes / 1024).toFixed(0)} reduction=${(((originalBytes - compressedBytes) / originalBytes) * 100).toFixed(0)}% resizeMs=${resizeMs}`);
 
-    const systemPrompt = 'Roast comedian. One-liner selfie roasts. ' + V3_TONES[tier] + ' ONE sentence, no preamble, no quotes. NEVER say you can\'t identify someone. NEVER apologise or say sorry. No hedging, no disclaimers.';
+    const personaBlock = V3_PERSONAS[persona] || '';
+    const systemPrompt = 'Roast comedian. One-liner selfie roasts. ' + V3_TONES[tier] + (personaBlock ? ' ' + personaBlock : '') + ' ONE sentence, no preamble, no quotes. NEVER say you can\'t identify someone. NEVER apologise or say sorry. No hedging, no disclaimers.';
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -7278,7 +7291,7 @@ app.post('/api/roast-v3', async (req, res) => {
     }
 
     const totalTime = Date.now() - t0;
-    console.log(`[roast-v3] tier=${tier} totalTime=${totalTime}ms fallback=${usedFallback}${reason ? ' reason=' + reason : ''}`);
+    console.log(`[roast-v3] tier=${tier} persona=${persona} totalTime=${totalTime}ms fallback=${usedFallback}${reason ? ' reason=' + reason : ''}`);
 
     const meta = { usedFallback };
     if (usedFallback && reason) meta.rejectReason = reason;
