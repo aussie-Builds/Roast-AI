@@ -119,7 +119,6 @@ export default function PreviewScreen() {
   const [shareMode, setShareMode] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
-  const [cachedSafeTags, setCachedSafeTags] = useState<Record<string, any> | null>(null);
   const animValue = useRef(new Animated.Value(0)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
@@ -205,14 +204,10 @@ export default function PreviewScreen() {
       const file = new File(uri);
       const base64 = await file.base64();
 
-      const response = await fetch(`${API_BASE_URL}/api/roast`, {
+      const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64,
-          level,
-          ...(level === 'nuclear' && cachedSafeTags ? { safeTags: cachedSafeTags } : {}),
-        }),
+        body: JSON.stringify({ imageBase64: base64, level }),
       });
 
       const data = await response.json();
@@ -225,7 +220,6 @@ export default function PreviewScreen() {
         throw new Error('Invalid response from server');
       }
 
-      if (data.safeTags) setCachedSafeTags(data.safeTags);
       setRoasts(data.roasts);
       await recordRoast(level);
     } catch (err) {
@@ -274,14 +268,10 @@ export default function PreviewScreen() {
       const file = new File(uri!);
       const base64 = await file.base64();
 
-      const response = await fetch(`${API_BASE_URL}/api/roast`, {
+      const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64,
-          level: nextLevel,
-          ...(nextLevel === 'nuclear' && cachedSafeTags ? { safeTags: cachedSafeTags } : {}),
-        }),
+        body: JSON.stringify({ imageBase64: base64, level: nextLevel }),
       });
 
       const data = await response.json();
@@ -294,7 +284,6 @@ export default function PreviewScreen() {
         throw new Error('Invalid response from server');
       }
 
-      if (data.safeTags) setCachedSafeTags(data.safeTags);
       setRoasts(data.roasts);
       await recordRoast(nextLevel);
     } catch (err) {
