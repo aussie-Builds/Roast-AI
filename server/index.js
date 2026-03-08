@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
+import sharp from 'sharp';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -693,6 +694,102 @@ function tokenOverlap(a, b) {
 
 function normalizeForOverlap(s) {
   return s.toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Detect model refusal / policy text that should never be returned as a roast
+function isRefusalLike(text) {
+  if (!text || typeof text !== 'string') return false;
+  const t = text.toLowerCase().trim();
+  return (
+    t.includes("i'm sorry") ||
+    t.includes("i am sorry") ||
+    t.includes("i can't assist") ||
+    t.includes("i cannot assist") ||
+    t.includes("can't help with that") ||
+    t.includes("cannot help with that") ||
+    t.includes("unable to help") ||
+    t.includes("unable to comply") ||
+    t.includes("as an ai") ||
+    t.includes("i can't comply") ||
+    t.includes("i cannot comply") ||
+    t.includes("i can't do that") ||
+    t.includes("i cannot do that") ||
+    t.includes("request goes against") ||
+    t.includes("violates policy") ||
+    t.includes("policy") ||
+    t.includes("guidelines")
+  );
+}
+
+// Detect identity-uncertainty / assistanty phrasing that should never appear in a roast
+function isIdentityUncertainty(text) {
+  if (!text || typeof text !== 'string') return false;
+  const t = text.toLowerCase();
+  return (
+    t.includes("who this is") ||
+    t.includes("who that is") ||
+    t.includes("i can't tell") ||
+    t.includes("i cannot tell") ||
+    t.includes("i don't know who") ||
+    t.includes("i do not know who") ||
+    t.includes("i'm not sure") ||
+    t.includes("i am not sure") ||
+    t.includes("i'll focus on") ||
+    t.includes("i will focus on") ||
+    t.includes("i can help") ||
+    t.includes("i'm here to help") ||
+    t.includes("i am here to help") ||
+    t.includes("but it looks like") ||
+    t.includes("but i'll focus") ||
+    t.includes("let me focus")
+  );
+}
+
+// Fast-path check: can we skip the expensive LLM polish call for this skeleton?
+function canSkipPolish(text, tier) {
+  if (!text || typeof text !== 'string') return false;
+  const trimmed = text.trim();
+  // Must end with punctuation
+  if (!/[.!?]$/.test(trimmed)) return false;
+  // No refusal / identity uncertainty / banned patterns
+  if (isRefusalLike(trimmed) || isIdentityUncertainty(trimmed)) return false;
+  if (nv2HasBannedPatterns(trimmed)) return false;
+  if (!isPlaySafe(trimmed)) return false;
+  // Must not contain raw template markers
+  if (trimmed.includes('{') || trimmed.includes('}')) return false;
+
+  const wc = trimmed.split(/\s+/).length;
+  if (tier === 'mild') {
+    // Sweet spot: 8–13 words, 1 sentence
+    if (wc < 8 || wc > 13) return false;
+    const sents = trimmed.match(/[.!?]+/g);
+    if (!sents || sents.length !== 1) return false;
+  } else if (tier === 'medium') {
+    // Sweet spot: 9–16 words, 1 sentence
+    if (wc < 9 || wc > 16) return false;
+    const sents = trimmed.match(/[.!?]+/g);
+    if (!sents || sents.length !== 1) return false;
+  } else if (tier === 'savage') {
+    // Sweet spot: 11–22 words, 1–2 sentences
+    if (wc < 11 || wc > 22) return false;
+    const sents = trimmed.match(/[.!?]+/g);
+    if (!sents || sents.length < 1 || sents.length > 2) return false;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// Replace any refusal-like roasts in an array with a tier-appropriate fallback
+function filterRefusals(roasts, tierName) {
+  const tierFallbacks = FALLBACKS[tierName] || FALLBACKS.medium;
+  return roasts.map(r => {
+    if (isRefusalLike(r)) {
+      console.log(`[roast] refusalRejected=true`, { tier: tierName, text: r.slice(0, 80) });
+      return tierFallbacks[Math.floor(Math.random() * tierFallbacks.length)];
+    }
+    return r;
+  });
 }
 
 // Extract sentence 2 from a roast (second non-empty sentence, or "" if <2 sentences)
@@ -4634,6 +4731,7 @@ function sv2CleanOutput(text) {
 
 // --- Main Savage V2 generator ---
 async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
+  const _t0 = Date.now();
   const isDev = process.env.NODE_ENV !== 'production';
   const state = getSavageClientState(clientId);
   const clientKey = clientId || 'anon';
@@ -4692,6 +4790,7 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
         candidatesCount: 1,
         winnerScore: null,
       };
+      console.log('[savage-v2 timing]', { micro: true, totalMs: Date.now() - _t0 });
       return { roast: finalRoast, meta: microMeta };
     } else {
       // Micro fails validation, fall through to normal candidate path
@@ -4805,6 +4904,8 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
     console.log('[sav2] uniqueTemplates=%d/%d top3: %s', uniqueTemplates, SV2_LOCAL_CANDIDATES, top3.join(' | '));
   }
 
+  const _tPrep = Date.now();
+
   // 3. Polish best candidate (fallback to 2nd-best if validation fails)
   async function polishAndValidate(candidate) {
     let polished = candidate.skeleton;
@@ -4814,7 +4915,7 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
         const polishOpts = {
           model: 'gpt-4o',
           input: [
-            { role: 'system', content: 'You are a roast rewriter. You ONLY output the rewritten roast. No quotes, no explanation, no markdown. 1–2 sentences only. Savage but not cruel.' },
+            { role: 'system', content: 'You are a roast rewriter. You ONLY output the rewritten roast. No quotes, no explanation, no markdown. 1–2 sentences only. Savage but not cruel. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
             {
               role: 'user',
               content: [
@@ -4839,6 +4940,10 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
       if (isDev) console.log(`[savage-v2] banned pattern detected`);
       return null;
     }
+    if (isIdentityUncertainty(result) || isRefusalLike(result)) {
+      if (isDev) console.log(`[savage-v2] identity-uncertainty/refusal rejected: "${result.slice(0, 60)}"`);
+      return null;
+    }
     if (!isPlaySafe(result)) {
       if (isDev) console.log(`[savage-v2] play-safe filter triggered`);
       return null;
@@ -4847,24 +4952,42 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
     return result;
   }
 
-  // Try best candidate
+  // Try best candidate — skip polish if skeleton already passes quality gate
   const best = candidates[0];
-  finalRoast = await polishAndValidate(best);
-  if (finalRoast) {
+  if (best && canSkipPolish(best.skeleton, 'savage')) {
+    finalRoast = sv2CleanOutput(best.skeleton);
     pickedStructure = best.structure;
     pickedTarget = best.target;
     wordCount = finalRoast.split(/\s+/).length;
+    if (isDev) console.log(`[savage-v2] polishSkipped=true skeleton="${finalRoast.slice(0, 60)}"`);
+  }
+
+  if (!finalRoast) {
+    finalRoast = await polishAndValidate(best);
+    if (finalRoast) {
+      pickedStructure = best.structure;
+      pickedTarget = best.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
   }
 
   // Fallback: try 2nd-best candidate (one extra polish attempt max)
   if (!finalRoast && candidates.length > 1) {
     const second = candidates[1];
     if (isDev) console.log(`[savage-v2] best failed validation, trying 2nd-best template=${second.structure.id}`);
-    finalRoast = await polishAndValidate(second);
-    if (finalRoast) {
+    if (canSkipPolish(second.skeleton, 'savage')) {
+      finalRoast = sv2CleanOutput(second.skeleton);
       pickedStructure = second.structure;
       pickedTarget = second.target;
       wordCount = finalRoast.split(/\s+/).length;
+      if (isDev) console.log(`[savage-v2] polishSkipped=true (2nd) skeleton="${finalRoast.slice(0, 60)}"`);
+    } else {
+      finalRoast = await polishAndValidate(second);
+      if (finalRoast) {
+        pickedStructure = second.structure;
+        pickedTarget = second.target;
+        wordCount = finalRoast.split(/\s+/).length;
+      }
     }
   }
 
@@ -4898,6 +5021,9 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
     console.log(`[savage-v2] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" fallback=${fallbackUsed} words=${wordCount}`);
     console.log(`[savage-v2] result="${finalRoast}"`);
   }
+
+  const _tDone = Date.now();
+  console.log('[savage-v2 timing]', { prepMs: _tPrep - _t0, polishMs: _tDone - _tPrep, totalMs: _tDone - _t0 });
 
   const normalMeta = {
     tier: 'savage',
@@ -5435,6 +5561,8 @@ async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTarget
     if (Array.isArray(selfieTags.objects)) selfieAttrs.push(...selfieTags.objects);
   }
 
+  const _tAttrDone = Date.now();
+
   // 0. Micro-template fast path (10% chance)
   const useMicro = Math.random() < NSV_MICRO_TEMPLATE_RATE;
   if (useMicro) {
@@ -5511,6 +5639,8 @@ async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTarget
     const top3 = candidates.slice(0, 3).map((c, i) => `#${i + 1} tmpl=${c.structure.id} fam=${c.familyId} wc=${c.wordCount} score=${c.wcScore} [${(c.scoreBreakdown || []).join(',')}]`);
     console.log(`[nuclear-sv] skeletons=${skeletonsGenerated} top3: ${top3.join(' | ')}`);
   }
+
+  const _tSkeletonDone = Date.now();
 
   // 3. Polish via single LLM call — try best, then 2nd-best
   async function nsvPolishAndValidate(candidate) {
@@ -5624,6 +5754,7 @@ async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTarget
   console.log(`[nuclear-sv] clientId=${clientId} structureId=${pickedStructure.id} target="${pickedTarget}" fallback=${fallbackUsed} words=${wordCount}`);
   console.log(`[nuclear-sv] result="${finalRoast}"`);
   console.log(`[nuclear-sv] skeletonsGenerated=${skeletonsGenerated} skeletonScoreTop=${skeletonScoreTop} totalTime=${t2 - t0}ms`);
+  console.log('[nuclear-sv timing]', { attrPrepMs: _tAttrDone - t0, skeletonGenMs: _tSkeletonDone - _tAttrDone, polishMs: t2 - _tSkeletonDone, totalMs: t2 - t0 });
 
   return {
     roast: finalRoast,
@@ -5793,6 +5924,7 @@ function mv2CleanOutput(text) {
 
 // --- Medium V2 generator ---
 async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
+  const _t0 = Date.now();
   const isDev = process.env.NODE_ENV !== 'production';
   const state = getMediumClientState(clientId);
   const recentFamilies = getMediumFamilyHistory(clientId);
@@ -5899,6 +6031,8 @@ async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
     console.log(`[medium-v2] skeletons=${candidates.length} top3: ${top3.join(' | ')}`);
   }
 
+  const _tPrep = Date.now();
+
   // 3. Polish best candidate via single LLM call (production only)
   async function mv2PolishAndValidate(candidate) {
     let polished = candidate.skeleton;
@@ -5908,7 +6042,7 @@ async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
         const polishResp = await openai.responses.create({
           model: 'gpt-4o',
           input: [
-            { role: 'system', content: 'You are a friendly roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Conversational, not cruel. 10–16 words.' },
+            { role: 'system', content: 'You are a friendly roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Conversational, not cruel. 10–16 words. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
             {
               role: 'user',
               content: [
@@ -5933,6 +6067,10 @@ async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
       if (isDev) console.log(`[medium-v2] validation fail: bannedPattern text="${result}"`);
       return null;
     }
+    if (isIdentityUncertainty(result) || isRefusalLike(result)) {
+      if (isDev) console.log(`[medium-v2] identity-uncertainty/refusal rejected: "${result.slice(0, 60)}"`);
+      return null;
+    }
     if (!isPlaySafe(result)) {
       if (isDev) console.log(`[medium-v2] validation fail: safety text="${result}"`);
       return null;
@@ -5940,24 +6078,42 @@ async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
     return result;
   }
 
-  // Try best candidate
+  // Try best candidate — skip polish if skeleton already passes quality gate
   const best = candidates[0];
-  finalRoast = await mv2PolishAndValidate(best);
-  if (finalRoast) {
+  if (best && canSkipPolish(best.skeleton, 'medium')) {
+    finalRoast = mv2CleanOutput(best.skeleton);
     pickedStructure = best.structure;
     pickedTarget = best.target;
     wordCount = finalRoast.split(/\s+/).length;
+    if (isDev) console.log(`[medium-v2] polishSkipped=true skeleton="${finalRoast.slice(0, 60)}"`);
+  }
+
+  if (!finalRoast) {
+    finalRoast = await mv2PolishAndValidate(best);
+    if (finalRoast) {
+      pickedStructure = best.structure;
+      pickedTarget = best.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
   }
 
   // Fallback: try 2nd-best candidate
   if (!finalRoast && candidates.length > 1) {
     const second = candidates[1];
     if (isDev) console.log(`[medium-v2] best failed, trying 2nd: tmpl=${second.structure.id}`);
-    finalRoast = await mv2PolishAndValidate(second);
-    if (finalRoast) {
+    if (canSkipPolish(second.skeleton, 'medium')) {
+      finalRoast = mv2CleanOutput(second.skeleton);
       pickedStructure = second.structure;
       pickedTarget = second.target;
       wordCount = finalRoast.split(/\s+/).length;
+      if (isDev) console.log(`[medium-v2] polishSkipped=true (2nd) skeleton="${finalRoast.slice(0, 60)}"`);
+    } else {
+      finalRoast = await mv2PolishAndValidate(second);
+      if (finalRoast) {
+        pickedStructure = second.structure;
+        pickedTarget = second.target;
+        wordCount = finalRoast.split(/\s+/).length;
+      }
     }
   }
 
@@ -5984,6 +6140,8 @@ async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
   }
 
   const winnerScore = (!fallbackUsed && best) ? best.wcScore : 0;
+  const _tDone = Date.now();
+  console.log('[medium-v2 timing]', { prepMs: _tPrep - _t0, polishMs: _tDone - _tPrep, totalMs: _tDone - _t0 });
 
   return {
     roast: finalRoast,
@@ -6053,6 +6211,7 @@ function mlv2CleanOutput(text) {
 
 // --- Mild V2 generator (template-based, mirrors Medium architecture) ---
 async function generateMildV2({ imageBase64, clientId = 'anon' }) {
+  const _t0 = Date.now();
   const isDev = process.env.NODE_ENV !== 'production';
   const state = getMildClientState(clientId);
   const recentFamilies = getMildFamilyHistory(clientId);
@@ -6158,6 +6317,8 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
     console.log(`[mild-v2] skeletons=${candidates.length} top3: ${top3.join(' | ')}`);
   }
 
+  const _tPrep = Date.now();
+
   // 3. Polish best candidate via single LLM call (production only)
   async function mlv2PolishAndValidate(candidate) {
     let polished = candidate.skeleton;
@@ -6167,7 +6328,7 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
         const polishResp = await openai.responses.create({
           model: 'gpt-4o',
           input: [
-            { role: 'system', content: 'You are a gentle roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Playful and light, never harsh. 9–11 words preferred.' },
+            { role: 'system', content: 'You are a gentle roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Playful and light, never harsh. 9–11 words preferred. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
             {
               role: 'user',
               content: [
@@ -6192,6 +6353,10 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
       if (isDev) console.log(`[mild-v2] validation fail: bannedPattern text="${result}"`);
       return null;
     }
+    if (isIdentityUncertainty(result) || isRefusalLike(result)) {
+      if (isDev) console.log(`[mild-v2] identity-uncertainty/refusal rejected: "${result.slice(0, 60)}"`);
+      return null;
+    }
     if (!isPlaySafe(result)) {
       if (isDev) console.log(`[mild-v2] validation fail: safety text="${result}"`);
       return null;
@@ -6199,24 +6364,42 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
     return result;
   }
 
-  // Try best candidate
+  // Try best candidate — skip polish if skeleton already passes quality gate
   const best = candidates[0];
-  finalRoast = await mlv2PolishAndValidate(best);
-  if (finalRoast) {
+  if (best && canSkipPolish(best.skeleton, 'mild')) {
+    finalRoast = mlv2CleanOutput(best.skeleton);
     pickedStructure = best.structure;
     pickedTarget = best.target;
     wordCount = finalRoast.split(/\s+/).length;
+    if (isDev) console.log(`[mild-v2] polishSkipped=true skeleton="${finalRoast.slice(0, 60)}"`);
+  }
+
+  if (!finalRoast) {
+    finalRoast = await mlv2PolishAndValidate(best);
+    if (finalRoast) {
+      pickedStructure = best.structure;
+      pickedTarget = best.target;
+      wordCount = finalRoast.split(/\s+/).length;
+    }
   }
 
   // Fallback: try 2nd-best candidate
   if (!finalRoast && candidates.length > 1) {
     const second = candidates[1];
     if (isDev) console.log(`[mild-v2] best failed, trying 2nd: tmpl=${second.structure.id}`);
-    finalRoast = await mlv2PolishAndValidate(second);
-    if (finalRoast) {
+    if (canSkipPolish(second.skeleton, 'mild')) {
+      finalRoast = mlv2CleanOutput(second.skeleton);
       pickedStructure = second.structure;
       pickedTarget = second.target;
       wordCount = finalRoast.split(/\s+/).length;
+      if (isDev) console.log(`[mild-v2] polishSkipped=true (2nd) skeleton="${finalRoast.slice(0, 60)}"`);
+    } else {
+      finalRoast = await mlv2PolishAndValidate(second);
+      if (finalRoast) {
+        pickedStructure = second.structure;
+        pickedTarget = second.target;
+        wordCount = finalRoast.split(/\s+/).length;
+      }
     }
   }
 
@@ -6243,6 +6426,8 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
   }
 
   const winnerScore = (!fallbackUsed && best) ? best.wcScore : 0;
+  const _tDone = Date.now();
+  console.log('[mild-v2 timing]', { prepMs: _tPrep - _t0, polishMs: _tDone - _tPrep, totalMs: _tDone - _t0 });
 
   return {
     roast: finalRoast,
@@ -6259,8 +6444,16 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
   };
 }
 
+// Normalize bare base64 to a data URL so generators receive the same format as the tuning harness
+function ensureDataUrl(imageBase64) {
+  if (!imageBase64 || typeof imageBase64 !== 'string') return imageBase64;
+  if (imageBase64.startsWith('data:image/')) return imageBase64;
+  return `data:image/jpeg;base64,${imageBase64}`;
+}
+
 app.post('/api/roast', async (req, res) => {
   try {
+    const started = Date.now();
     const { imageBase64, level = 'medium', clientId, useSavageV2, sceneHints, safeTags } = req.body;
 
     if (!imageBase64) {
@@ -6272,11 +6465,112 @@ app.post('/api/roast', async (req, res) => {
       return jsonError(res, 413, 'payload_too_large', 'Image is too large. Please use a smaller image.');
     }
 
+    const normalizedImageBase64 = ensureDataUrl(imageBase64);
     const tierName = Object.hasOwn(INTENSITY_CONFIG, level) ? level : 'medium';
     const config = INTENSITY_CONFIG[tierName];
     const isDev = process.env.NODE_ENV !== 'production';
-    const avoidThemes = recentThemes.length > 0 ? recentThemes.join(', ') : 'none yet';
+    const resolvedClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
 
+    // --- Modern V2 engine routing (all tiers) ---
+
+    if (tierName === 'mild') {
+      const { roast, meta } = await generateMildV2({ imageBase64: normalizedImageBase64, clientId: resolvedClientId });
+      if (isDev) {
+        console.log(`[mild-v2] clientId=${resolvedClientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} score=${meta.winnerScore}`);
+        console.log(`[mild-v2] result="${roast}"`);
+      }
+      console.log('[api/roast] modern early route', { level: tierName, ms: Date.now() - started });
+      return res.json({ roasts: filterRefusals([roast], tierName) });
+    }
+
+    if (tierName === 'medium') {
+      const { roast, meta } = await generateMediumV2({ imageBase64: normalizedImageBase64, clientId: resolvedClientId });
+      if (isDev) {
+        console.log(`[medium-v2] clientId=${resolvedClientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} score=${meta.winnerScore}`);
+        console.log(`[medium-v2] result="${roast}"`);
+      }
+      console.log('[api/roast] modern early route', { level: tierName, ms: Date.now() - started });
+      return res.json({ roasts: filterRefusals([roast], tierName) });
+    }
+
+    if (tierName === 'savage') {
+      const { roast, meta } = await generateSavageV2({ clientId: resolvedClientId, imageBase64: normalizedImageBase64 });
+      pushRecentSavage(roast);
+      if (isDev) {
+        console.log(`[savage-v2] served clientId=${meta.clientId} struct=${meta.pickedStructureId} target="${meta.pickedTarget}" attempts=${meta.attempts} fallback=${meta.fallbackUsed} words=${meta.wordCount}`);
+      }
+      console.log('[api/roast] modern early route', { level: tierName, ms: Date.now() - started });
+      return res.json({ roasts: filterRefusals([roast], tierName) });
+    }
+
+    if (tierName === 'nuclear') {
+      // Nuclear-SV (preferred) or Nuclear-V2 based on NUCLEAR_ENGINE env
+      if (process.env.NUCLEAR_ENGINE === 'sv') {
+        const _tTagStart = Date.now();
+        let nsvSelfieTags = null;
+        let tagsSource = 'none';
+
+        if (safeTags && typeof safeTags === 'object' && !Array.isArray(safeTags)) {
+          nsvSelfieTags = safeTags;
+          tagsSource = 'request';
+        } else if (process.env.NUCLEAR_SV_SKIP_TAGS === '1') {
+          nsvSelfieTags = null;
+          tagsSource = 'skipped';
+        } else {
+          nsvSelfieTags = await extractSafeSelfieTags(normalizedImageBase64);
+          tagsSource = 'extracted';
+        }
+
+        const _tTagEnd = Date.now();
+        console.log('[nuclear-sv route]', { tagsSource, tagMs: _tTagEnd - _tTagStart });
+        if (isDev) console.log(`[nuclear-sv] clientId=${resolvedClientId}`);
+
+        const { roast, meta } = await generateNuclearSv({ clientId: resolvedClientId, imageBase64: normalizedImageBase64, selfieTags: nsvSelfieTags });
+        if (isDev) {
+          console.log(`[nuclear-sv] served clientId=${meta.clientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} skeletonsGenerated=${meta.skeletonsGenerated} skeletonScoreTop=${meta.skeletonScoreTop} totalTime=${meta.totalTime}ms`);
+        }
+        console.log('[api/roast] modern early route', { level: tierName, engine: 'sv', ms: Date.now() - started });
+        return res.json({ roasts: filterRefusals([roast], tierName), meta: { mode: 'nuclear-sv' }, safeTags: nsvSelfieTags || null });
+      }
+
+      // Nuclear V2 fallback
+      if (isDev) console.log(`[nuclear-v2] clientId=${resolvedClientId}`);
+
+      const _tNv2TagStart = Date.now();
+      let dynamicTargets = [];
+      if (Array.isArray(sceneHints) && sceneHints.length > 0) {
+        dynamicTargets = nv2FilterSceneNouns(sceneHints);
+        if (isDev) console.log(`[nuclear-v2] using ${dynamicTargets.length} client-provided sceneHints (filtered)`);
+      } else {
+        dynamicTargets = await nv2ExtractSceneNouns(normalizedImageBase64);
+        if (isDev) console.log(`[nuclear-v2] scene-tagger extracted ${dynamicTargets.length} targets: [${dynamicTargets.slice(0, 6).join(', ')}]`);
+      }
+      const _tNv2SceneDone = Date.now();
+
+      let selfieTags = null;
+      if (safeTags && typeof safeTags === 'object' && !Array.isArray(safeTags)) {
+        selfieTags = safeTags;
+        if (isDev) console.log(`[nuclear-v2] using client-provided safeTags`);
+      } else {
+        selfieTags = await extractSafeSelfieTags(normalizedImageBase64);
+        if (isDev) console.log(`[nuclear-v2] selfie-tags extracted: objects=${selfieTags.objects.length} angle=${selfieTags.angle} lighting=${selfieTags.lighting} framing=${selfieTags.framing} setting=${selfieTags.setting} pose=${selfieTags.pose} hair=${selfieTags.hair} outfit=${selfieTags.outfit} expression=${selfieTags.expression} grooming=${selfieTags.grooming} bg_vibe=${selfieTags.bg_vibe} face_visible=${selfieTags.face_visible} face_obstructed=${selfieTags.face_obstructed} face_visibility=${selfieTags.face_visibility} face_confidence=${selfieTags.face_confidence} hair_confidence=${selfieTags.hair_confidence} person_present=${selfieTags.person_present} hair_visible=${selfieTags.hair_visible} outfit_visible=${selfieTags.outfit_visible}`);
+      }
+
+      const _tNv2TagDone = Date.now();
+      console.log('[nuclear-v2 route timing]', { sceneMs: _tNv2SceneDone - _tNv2TagStart, selfieTagMs: _tNv2TagDone - _tNv2SceneDone, totalTagMs: _tNv2TagDone - _tNv2TagStart });
+
+      const { roast, meta } = await generateNuclearV2({ clientId: resolvedClientId, imageBase64: normalizedImageBase64, dynamicTargets, selfieTags });
+      if (isDev) {
+        console.log(`[nuclear-v2] served clientId=${meta.clientId} candidates=${meta.candidateCount} valid=${meta.validCount} winnerScore=${meta.winnerScore} sceneRaw=${meta.sceneTargetCount} sceneFiltered=${meta.sceneTargetsAfterFilter} tagObjects=${meta.tagObjectCount} tagModifiers=[${meta.tagModifiers.join(',')}] selfieAttrs=[${meta.selfieAttrs.join(',')}] fallback=${meta.fallbackUsed} words=${meta.wordCount}`);
+      }
+      console.log('[api/roast] modern early route', { level: tierName, engine: 'v2', ms: Date.now() - started });
+      return res.json({ roasts: filterRefusals([roast], tierName) });
+    }
+
+    // --- Legacy fallback (should not be reached for known tiers) ---
+    console.log('[api/roast] legacy path reached', { level, tierName });
+
+    const avoidThemes = recentThemes.length > 0 ? recentThemes.join(', ') : 'none yet';
     const prompt = buildPrompt(config, tierName, avoidThemes);
     const isHighTier = tierName === 'savage' || tierName === 'nuclear';
 
@@ -6349,7 +6643,7 @@ app.post('/api/roast', async (req, res) => {
 
     const imageContent = [
       { type: 'input_text', text: prompt },
-      { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+      { type: 'input_image', image_url: nv2ToDataUrl(normalizedImageBase64) },
     ];
 
     // --- Build call options (with model params per tier) ---
@@ -6372,116 +6666,6 @@ app.post('/api/roast', async (req, res) => {
     let roasts = [];
     let themes = [];
     const levelFallbacks = FALLBACKS[tierName] || FALLBACKS.medium;
-
-    // --- Nuclear-SV intercept: local skeleton + single LLM polish (NUCLEAR_ENGINE=sv) ---
-    if (tierName === 'nuclear' && process.env.NUCLEAR_ENGINE === 'sv') {
-      const nsvClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
-      if (isDev) console.log(`[nuclear-sv] clientId=${nsvClientId}`);
-
-      // Extract selfie tags (reuse client-provided or extract)
-      let nsvSelfieTags = null;
-      if (safeTags && typeof safeTags === 'object' && !Array.isArray(safeTags)) {
-        nsvSelfieTags = safeTags;
-      } else {
-        nsvSelfieTags = await extractSafeSelfieTags(imageBase64);
-      }
-
-      const { roast, meta } = await generateNuclearSv({ clientId: nsvClientId, imageBase64, selfieTags: nsvSelfieTags });
-      roasts = [roast];
-      themes = [];
-      if (isDev) {
-        console.log(`[nuclear-sv] served clientId=${meta.clientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} skeletonsGenerated=${meta.skeletonsGenerated} skeletonScoreTop=${meta.skeletonScoreTop} totalTime=${meta.totalTime}ms`);
-      }
-      roasts = roasts.slice(0, config.count);
-      if (isDev) {
-        console.log(`[roast] level=${tierName} mode=nuclear-sv returned=${roasts.length} chars=${roasts[0]?.length || 0}`);
-      }
-      return res.json({ roasts, meta: { mode: 'nuclear-sv' } });
-    }
-
-    // --- Nuclear V2 intercept: use hybrid skeleton+polish system ---
-    if (tierName === 'nuclear') {
-      const nv2ClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
-      if (isDev) console.log(`[nuclear-v2] clientId=${nv2ClientId} (from request: ${typeof clientId === 'string' ? 'yes' : 'no'})`);
-
-      // Scene tagger: use client-provided hints or extract from image
-      let dynamicTargets = [];
-      if (Array.isArray(sceneHints) && sceneHints.length > 0) {
-        dynamicTargets = nv2FilterSceneNouns(sceneHints);
-        if (isDev) console.log(`[nuclear-v2] using ${dynamicTargets.length} client-provided sceneHints (filtered)`);
-      } else {
-        dynamicTargets = await nv2ExtractSceneNouns(imageBase64);
-        if (isDev) console.log(`[nuclear-v2] scene-tagger extracted ${dynamicTargets.length} targets: [${dynamicTargets.slice(0, 6).join(', ')}]`);
-      }
-
-      // Selfie tags: use client-provided safeTags or extract from image
-      let selfieTags = null;
-      if (safeTags && typeof safeTags === 'object' && !Array.isArray(safeTags)) {
-        selfieTags = safeTags;
-        if (isDev) console.log(`[nuclear-v2] using client-provided safeTags`);
-      } else {
-        selfieTags = await extractSafeSelfieTags(imageBase64);
-        if (isDev) console.log(`[nuclear-v2] selfie-tags extracted: objects=${selfieTags.objects.length} angle=${selfieTags.angle} lighting=${selfieTags.lighting} framing=${selfieTags.framing} setting=${selfieTags.setting} pose=${selfieTags.pose} hair=${selfieTags.hair} outfit=${selfieTags.outfit} expression=${selfieTags.expression} grooming=${selfieTags.grooming} bg_vibe=${selfieTags.bg_vibe} face_visible=${selfieTags.face_visible} face_obstructed=${selfieTags.face_obstructed} face_visibility=${selfieTags.face_visibility} face_confidence=${selfieTags.face_confidence} hair_confidence=${selfieTags.hair_confidence} person_present=${selfieTags.person_present} hair_visible=${selfieTags.hair_visible} outfit_visible=${selfieTags.outfit_visible}`);
-      }
-
-      const { roast, meta } = await generateNuclearV2({ clientId: nv2ClientId, imageBase64, dynamicTargets, selfieTags });
-      roasts = [roast];
-      themes = [];
-      // pushRecentNuclear already called inside generateNuclearV2
-      if (isDev) {
-        console.log(`[nuclear-v2] served clientId=${meta.clientId} candidates=${meta.candidateCount} valid=${meta.validCount} winnerScore=${meta.winnerScore} sceneRaw=${meta.sceneTargetCount} sceneFiltered=${meta.sceneTargetsAfterFilter} tagObjects=${meta.tagObjectCount} tagModifiers=[${meta.tagModifiers.join(',')}] selfieAttrs=[${meta.selfieAttrs.join(',')}] fallback=${meta.fallbackUsed} words=${meta.wordCount}`);
-      }
-      // Skip all legacy nuclear logic — jump straight to response
-      roasts = roasts.slice(0, config.count);
-      if (isDev) {
-        console.log(`[roast] level=${tierName} returned=${roasts.length} chars=${roasts[0]?.length || 0}`);
-      }
-      return res.json({ roasts });
-    }
-
-    // --- Savage V2 debug toggle: opt-in via useSavageV2 + dev/debug mode ---
-    const sv2Debug = (process.env.NV2_DEBUG === '1' || isDev) && useSavageV2 === true;
-    if (tierName === 'savage' && sv2Debug) {
-      const sv2ClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
-      const { roast, meta } = await generateSavageV2({ clientId: sv2ClientId, imageBase64 });
-      roasts = [roast];
-      themes = [];
-      pushRecentSavage(roast);
-      if (isDev) {
-        console.log(`[savage-v2] served clientId=${meta.clientId} struct=${meta.pickedStructureId} target="${meta.pickedTarget}" attempts=${meta.attempts} fallback=${meta.fallbackUsed} words=${meta.wordCount}`);
-      }
-      roasts = roasts.slice(0, config.count);
-      if (isDev) {
-        console.log(`[roast] level=${tierName} (v2) returned=${roasts.length} chars=${roasts[0]?.length || 0}`);
-      }
-      return res.json({ roasts });
-    }
-
-    // --- Mild V2 intercept: template-based candidate pipeline ---
-    if (tierName === 'mild') {
-      const mlv2ClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
-      const { roast, meta } = await generateMildV2({ imageBase64, clientId: mlv2ClientId });
-      roasts = [roast];
-      themes = [];
-      if (isDev) {
-        console.log(`[mild-v2] clientId=${mlv2ClientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} score=${meta.winnerScore}`);
-        console.log(`[mild-v2] result="${roast}"`);
-      }
-      return res.json({ roasts });
-    }
-
-    // --- Medium V2 intercept: template-based candidate pipeline ---
-    if (tierName === 'medium') {
-      const mv2ClientId = (typeof clientId === 'string' && clientId.trim()) ? clientId.trim() : 'anon';
-      const { roast, meta } = await generateMediumV2({ imageBase64, clientId: mv2ClientId });
-      roasts = [roast];
-      themes = [];
-      if (isDev) {
-        console.log(`[medium-v2] clientId=${mv2ClientId} struct=${meta.structureId} target="${meta.target}" fallback=${meta.fallbackUsed} words=${meta.wordCount} score=${meta.winnerScore}`);
-        console.log(`[medium-v2] result="${roast}"`);
-      }
-      return res.json({ roasts });
-    }
 
     if (isHighTier) {
       // --- Multi-sample generation for savage/nuclear ---
@@ -6917,7 +7101,7 @@ app.post('/api/roast', async (req, res) => {
       console.log(`[roast] level=${tierName} returned=${roasts.length} fallback=${usedFallback} chars=${roasts[0]?.length || 0}`);
     }
 
-    res.json({ roasts });
+    res.json({ roasts: filterRefusals(roasts, tierName) });
   } catch (error) {
     console.error('Roast error:', error);
     // Return 200 with fallback roast so client always gets valid JSON (never HTML error pages)
@@ -6925,6 +7109,186 @@ app.post('/api/roast', async (req, res) => {
     const errorFallbacks = FALLBACKS[safeTier] || FALLBACKS.medium;
     const fallback = errorFallbacks[Math.floor(Math.random() * errorFallbacks.length)];
     res.status(200).json({ roasts: [fallback] });
+  }
+});
+
+// ========================================================
+// POST /api/roast-v3 — single-call, no pipeline
+// ========================================================
+const V3_TONES = {
+  mild:    [
+    'Tone: light, playful teasing — like friends roasting each other. Witty but never cruel.',
+    'No harsh insults, no appearance attacks, no aggression, no profanity. Target 8–14 words, hard max 18. No trailing clauses unless they improve the punchline.',
+    'NEVER start with "That" — it is banned as a sentence opener. Also banned: "With that...", "Is that...".',
+    'Vary openers — try: "Your...", "Even...", "Looks like...", "This photo...", "The background...", "Confidence...", "Apparently...", "Somehow...", or any other fresh start.',
+    'Avoid questions unless the joke truly needs it. Avoid quoted dialogue unless it clearly improves the line.',
+    'Write like a meme caption — direct punchline, no setup. Lead with the observation, land on the joke.',
+    'Pick the MOST noticeable detail to roast — clothing, pose, camera angle, expression, background, pets, environment, or overall vibe. Do NOT default to hair.',
+    'Angles to try: ironic observations, mock compliments, deadpan commentary, unexpected comparisons, casual understatement.',
+    'End punchy and meme-worthy.',
+  ].join(' '),
+  medium:  [
+    'Tone: sarcastic and embarrassing — sharper than friendly teasing, clearly a roast. Playful but cutting.',
+    'No mild-style compliments, no gentle teasing. This should sting a little. Still app-safe. Target 8–14 words, hard max 18. No trailing clauses unless they improve the punchline.',
+    'NEVER start with "That" — it is banned as a sentence opener. Also banned: "With that...", "Is that...".',
+    'BANNED templates: "Your X looks like...", "Your X screams...", "Your X says...". Never use these structures.',
+    'Vary openers — try: "Even...", "Looks like...", "This photo...", "Somehow...", "Nobody asked for...", "Apparently...", "Confidence...", or any fresh start.',
+    'No long setups or explanations. Write like a meme caption — direct punchline, no filler.',
+    'Pick the MOST noticeable detail to roast — clothing, pose, camera angle, expression, background, pets, environment, or overall vibe. Do NOT default to hair.',
+    'Angles to try: sarcastic observations, backhanded compliments, deadpan dismissals, embarrassing comparisons, ironic narration, casual brutality.',
+    'Never repeat the same joke structure. Each roast should feel structurally unique.',
+    'End with a sharp, quotable punchline.',
+  ].join(' '),
+  savage:  [
+    'Tone: brutal, mocking, and aggressive — significantly harsher than medium. This should hurt to read. Make it sting.',
+    'No compliments, no soft language, no medium-style teasing. Go for the throat. Still funny and shareable. Target 8–14 words, hard max 18. No trailing clauses unless they improve the punchline.',
+    'NEVER start with "That" or "Looks like" — both are banned as sentence openers. Also banned: "With that...", "Is that...".',
+    'BANNED templates: "Your X looks like...", "Your X screams...", "Your X says...". Never use these structures.',
+    'Vary openers — try: "Even...", "Somehow...", "Nobody warned you...", "This photo...", "Confidence...", "Apparently...", "Someone should have...", or any fresh start.',
+    'No setups, no explanations. Hit them with a direct insult about what you see — clothing, pose, camera angle, expression, background, pets, environment, or overall vibe. Do NOT default to hair.',
+    'Prefer direct brutal observations over clever wordplay. Be mean, not cute.',
+    'Angles to try: savage mockery, brutal comparisons, deadpan cruelty, exaggerated disappointment, public humiliation.',
+    'Never repeat the same joke structure. Each roast should feel structurally unique.',
+    'End with a brutal punchline that hits like an insult you remember for years.',
+  ].join(' '),
+  nuclear: [
+    'Tone: ruthless, humiliating, and unforgiving — the harshest tier, significantly more brutal than savage. Maximum cruelty.',
+    'No compliments, no soft language, no savage-style cleverness. Pure destruction. Still funny and shareable. Target 8–14 words, hard max 18. No trailing clauses unless they improve the punchline.',
+    'Play Store safe — no slurs, no threats, no harassment, no sexual content. Destroy them within the rules.',
+    'NEVER start with "That" or "Looks like" — both are banned as sentence openers. Also banned: "With that...", "Is that...".',
+    'BANNED templates: "Your X looks like...", "Your X screams...", "Your X says...". Never use these structures.',
+    'Vary openers — try: "Even...", "Somehow...", "Nobody warned you...", "This photo...", "Apparently...", "Someone should have...", "Your barber...", "The audacity...", or any fresh start.',
+    'No setups, no explanations. Go straight for the kill — one brutal observation about what you see.',
+    'Roast the MOST noticeable visible detail — clothing, pose, camera angle, expression, background, pets, environment, or overall vibe. Do NOT default to hair.',
+    'Prefer maximum-impact insults over wordplay. Be ruthless, not clever.',
+    'Angles to try: public humiliation, brutal mockery, exaggerated disgust, merciless comparisons, deadpan devastation.',
+    'Never repeat the same joke structure. Each roast should feel structurally unique.',
+    'End with a punchline so brutal it could end a friendship.',
+  ].join(' '),
+};
+
+const V3_FALLBACKS = {
+  mild: [
+    'You look like you peaked in a participation trophy ceremony.',
+    'Even your camera tried to unfocus.',
+    'You look like you Google "how to be cool" daily.',
+  ],
+  medium: [
+    'You look like you got dressed in the dark during an earthquake.',
+    'Your vibe says "I peaked in middle school and never recovered."',
+    'That look screams "my personality is my Netflix queue."',
+  ],
+  savage: [
+    'You look like a before photo that never got an after.',
+    'Evolution really phoned it in with you.',
+    'You look like you were assembled from spare parts at a clearance sale.',
+  ],
+  nuclear: [
+    'If disappointment had a face, it would sue you for copyright.',
+    'You look like a AI-generated image of "rock bottom."',
+    'Your face is proof that God has a sense of humor and zero quality control.',
+  ],
+};
+
+const V3_REJECTED = [/\bi can'?t\b/i, /\bsorry\b/i, /\bas an ai\b/i];
+
+const V3_REJECT_LABELS = ['i_cant', 'sorry', 'as_an_ai'];
+
+const V3_MAX_WORDS = { mild: 20, medium: 20, savage: 20, nuclear: 20 };
+
+function v3Validate(text, tier) {
+  if (!text || typeof text !== 'string') {
+    console.log(`[roast-v3] rejected: empty_or_invalid -> ${JSON.stringify(text)}`);
+    return { ok: false, reason: 'empty_or_invalid' };
+  }
+  const trimmed = text.trim();
+  const maxWords = V3_MAX_WORDS[tier] || 20;
+  const wc = trimmed.split(/\s+/).length;
+  if (wc > maxWords) {
+    console.log(`[roast-v3] rejected: too_many_words (${wc}/${maxWords}) -> "${trimmed}"`);
+    return { ok: false, reason: 'too_many_words' };
+  }
+  for (let i = 0; i < V3_REJECTED.length; i++) {
+    if (V3_REJECTED[i].test(trimmed)) {
+      const label = V3_REJECT_LABELS[i] || 'banned_phrase';
+      console.log(`[roast-v3] rejected: ${label} -> "${trimmed}"`);
+      return { ok: false, reason: label };
+    }
+  }
+  return { ok: true, reason: null };
+}
+
+app.post('/api/roast-v3', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const { imageBase64, level } = req.body || {};
+    const tier = ['mild', 'medium', 'savage', 'nuclear'].includes(level) ? level : 'medium';
+
+    if (!imageBase64) {
+      return res.status(400).json({ error: 'missing_image', message: 'imageBase64 is required.' });
+    }
+
+    // Strip data-url header to get raw base64
+    const rawBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const originalBytes = Buffer.byteLength(rawBase64, 'base64');
+
+    // Resize & compress: 512px longest side, JPEG q70
+    const tResize = Date.now();
+    const compressed = await sharp(Buffer.from(rawBase64, 'base64'))
+      .resize(512, 512, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 70 })
+      .toBuffer();
+    const resizeMs = Date.now() - tResize;
+    const compressedBytes = compressed.length;
+    const dataUrl = `data:image/jpeg;base64,${compressed.toString('base64')}`;
+
+    console.log(`[roast-v3] image originalKB=${(originalBytes / 1024).toFixed(0)} compressedKB=${(compressedBytes / 1024).toFixed(0)} reduction=${(((originalBytes - compressedBytes) / originalBytes) * 100).toFixed(0)}% resizeMs=${resizeMs}`);
+
+    const systemPrompt = 'Roast comedian. One-liner selfie roasts. ' + V3_TONES[tier] + ' ONE sentence, no preamble, no quotes. NEVER say you can\'t identify someone. NEVER apologise or say sorry. No hedging, no disclaimers.';
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 40,
+      temperature: tier === 'nuclear' ? 1.1 : tier === 'savage' ? 1.0 : 0.9,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } },
+            { type: 'text', text: 'Roast them.' },
+          ],
+        },
+      ],
+    });
+
+    let roast = (completion.choices?.[0]?.message?.content || '').trim();
+
+    // Strip wrapping quotes if present
+    if ((roast.startsWith('"') && roast.endsWith('"')) || (roast.startsWith("'") && roast.endsWith("'"))) {
+      roast = roast.slice(1, -1).trim();
+    }
+
+    const { ok, reason } = v3Validate(roast, tier);
+    let usedFallback = false;
+    if (!ok) {
+      const fb = V3_FALLBACKS[tier];
+      roast = fb[Math.floor(Math.random() * fb.length)];
+      usedFallback = true;
+    }
+
+    const totalTime = Date.now() - t0;
+    console.log(`[roast-v3] tier=${tier} totalTime=${totalTime}ms fallback=${usedFallback}${reason ? ' reason=' + reason : ''}`);
+
+    const meta = { usedFallback };
+    if (usedFallback && reason) meta.rejectReason = reason;
+    return res.json({ roasts: [roast], meta });
+  } catch (err) {
+    const totalTime = Date.now() - t0;
+    console.error(`[roast-v3] error after ${totalTime}ms:`, err.message || err);
+    const tier = req.body?.level || 'medium';
+    const fb = V3_FALLBACKS[tier] || V3_FALLBACKS.medium;
+    return res.status(200).json({ roasts: [fb[Math.floor(Math.random() * fb.length)]] });
   }
 });
 
@@ -7042,6 +7406,7 @@ app.use((err, req, res, _next) => {
 if (!process.env.TUNING_MODE) {
   app.listen(port, '0.0.0.0', () => {
     console.log(`Roast server running at http://0.0.0.0:${port}`);
+    console.log('[config] NUCLEAR_ENGINE=', process.env.NUCLEAR_ENGINE || '(default:v2)');
   });
 }
 

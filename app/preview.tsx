@@ -95,6 +95,13 @@ const TIER_ANIM_DURATION: Record<RoastLevel, number> = {
   nuclear: 650,
 };
 
+const NEXT_TIER: Record<RoastLevel, RoastLevel | null> = {
+  mild: 'medium',
+  medium: 'savage',
+  savage: 'nuclear',
+  nuclear: null,
+};
+
 /** Split multi-sentence roasts into an array of sentences. */
 function splitSentences(text: string): string[] {
   const parts = text.split(/\.\s+/);
@@ -112,6 +119,7 @@ export default function PreviewScreen() {
   const [shareMode, setShareMode] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
+  const [cachedSafeTags, setCachedSafeTags] = useState<Record<string, any> | null>(null);
   const animValue = useRef(new Animated.Value(0)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
@@ -200,7 +208,11 @@ export default function PreviewScreen() {
       const response = await fetch(`${API_BASE_URL}/api/roast`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, level }),
+        body: JSON.stringify({
+          imageBase64: base64,
+          level,
+          ...(level === 'nuclear' && cachedSafeTags ? { safeTags: cachedSafeTags } : {}),
+        }),
       });
 
       const data = await response.json();
@@ -213,8 +225,78 @@ export default function PreviewScreen() {
         throw new Error('Invalid response from server');
       }
 
+      if (data.safeTags) setCachedSafeTags(data.safeTags);
       setRoasts(data.roasts);
       await recordRoast(level);
+    } catch (err) {
+      console.error('Roast error:', err);
+      if (err instanceof TypeError && err.message.includes('Network request failed')) {
+        setError('Cannot connect to server. Make sure the backend is running.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRoastHarder = async () => {
+    if (isLoading) return;
+    const nextLevel = NEXT_TIER[level];
+    if (!nextLevel) return;
+
+    if (nextLevel === 'nuclear') {
+      const confirmed = await new Promise<boolean>((resolve) =>
+        Alert.alert(
+          'Nuclear mode is experimental. Proceed?',
+          undefined,
+          [
+            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Proceed', style: 'destructive', onPress: () => resolve(true) },
+          ],
+        ),
+      );
+      if (!confirmed) return;
+    }
+
+    const check = await canRoast(nextLevel);
+    if (!check.allowed) {
+      setUpgradeReason(check.reason ?? '');
+      setUpgradeVisible(true);
+      return;
+    }
+
+    setLevel(nextLevel);
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const file = new File(uri!);
+      const base64 = await file.base64();
+
+      const response = await fetch(`${API_BASE_URL}/api/roast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          level: nextLevel,
+          ...(nextLevel === 'nuclear' && cachedSafeTags ? { safeTags: cachedSafeTags } : {}),
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || data.error || 'Failed to generate roast');
+      }
+
+      if (!data.roasts || !Array.isArray(data.roasts)) {
+        throw new Error('Invalid response from server');
+      }
+
+      if (data.safeTags) setCachedSafeTags(data.safeTags);
+      setRoasts(data.roasts);
+      await recordRoast(nextLevel);
     } catch (err) {
       console.error('Roast error:', err);
       if (err instanceof TypeError && err.message.includes('Network request failed')) {
@@ -332,7 +414,7 @@ export default function PreviewScreen() {
           ) : error ? (
             <View style={styles.errorContainer}>
               <Text style={styles.errorText}>{error}</Text>
-              <Pressable style={styles.retryButton} onPress={generateRoast}>
+              <Pressable style={styles.retryButton} onPress={() => generateRoast()}>
                 <Text style={styles.retryButtonText}>Try Again</Text>
               </Pressable>
             </View>
@@ -397,7 +479,7 @@ export default function PreviewScreen() {
               pressed && !isLoading && styles.buttonPressed,
               isLoading && styles.buttonDisabled,
             ]}
-            onPress={generateRoast}
+            onPress={() => generateRoast()}
             disabled={isLoading}
           >
             <Text style={styles.generateButtonText}>
@@ -406,19 +488,36 @@ export default function PreviewScreen() {
           </Pressable>
         ) : hasRoast ? (
           <>
-            <Pressable
-              style={({ pressed }) => [
-                styles.generateButton,
-                { backgroundColor: TIER_BUTTON_COLORS[level], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
-                pressed && !isLoading && styles.buttonPressed,
-              ]}
-              onPress={generateRoast}
-              disabled={isLoading}
-            >
-              <Text style={styles.generateButtonText}>
-                {isLoading ? 'Generating...' : 'Roast Again'}
-              </Text>
-            </Pressable>
+            <View style={styles.roastButtonRow}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.generateButton,
+                  styles.roastButtonRowItem,
+                  { backgroundColor: TIER_BUTTON_COLORS[level], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
+                  pressed && !isLoading && styles.buttonPressed,
+                ]}
+                onPress={() => generateRoast()}
+                disabled={isLoading}
+              >
+                <Text style={styles.generateButtonText}>
+                  {isLoading ? 'Generating...' : 'Roast Again'}
+                </Text>
+              </Pressable>
+              {NEXT_TIER[level] && (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.generateButton,
+                    styles.roastButtonRowItem,
+                    { backgroundColor: TIER_BUTTON_COLORS[NEXT_TIER[level]!], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
+                    pressed && !isLoading && styles.buttonPressed,
+                  ]}
+                  onPress={handleRoastHarder}
+                  disabled={isLoading}
+                >
+                  <Text style={styles.generateButtonText}>Roast Harder</Text>
+                </Pressable>
+              )}
+            </View>
             <Pressable
               style={({ pressed }) => [
                 styles.secondaryButton,
@@ -623,6 +722,13 @@ const styles = StyleSheet.create({
     right: 24,
     gap: 10,
     zIndex: 10,
+  },
+  roastButtonRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  roastButtonRowItem: {
+    flex: 1,
   },
   generateButton: {
     paddingVertical: 13,
