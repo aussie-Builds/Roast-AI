@@ -14,8 +14,6 @@ const envBase = process.env.EXPO_PUBLIC_API_BASE_URL;
 
 export const API_BASE_URL =
   envBase ||
-  (getExpoHost() ? `http://${getExpoHost()}:3000` : 'http://localhost:3000');
+  (getExpoHost() ? `http://${getExpoHost()}:3000` : 'https://roast-ai-0bfe.onrender.com');
 
-if (__DEV__) {
-  console.log('[API] Base URL:', API_BASE_URL);
-}
+console.log('API BASE URL:', API_BASE_URL);

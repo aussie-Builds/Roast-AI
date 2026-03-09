@@ -12,6 +12,7 @@ import {
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { File } from 'expo-file-system';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ViewShot from 'react-native-view-shot';
@@ -19,21 +20,20 @@ import * as Sharing from 'expo-sharing';
 
 import { API_BASE_URL } from '@/constants/api';
 import { canRoast, recordRoast } from '@/utils/rateLimiter';
+import { track } from '@/utils/analytics';
 import UpgradeModal from '@/components/UpgradeModal';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 type Persona = 'default' | 'butler' | 'mean_girl' | 'gym_bro' | 'anime_villain' | 'therapist';
 
 const PERSONA_LABELS: Record<Persona, string> = {
-  default: 'Default',
-  butler: 'Butler',
-  mean_girl: 'Mean Girl',
-  gym_bro: 'Gym Bro',
-  anime_villain: 'Villain',
-  therapist: 'Therapist',
+  default: '🔥 Default',
+  butler: '🎩 Butler',
+  mean_girl: '💅 Mean Girl',
+  gym_bro: '💪 Gym Bro',
+  anime_villain: '🦹 Villain',
+  therapist: '🧠 Therapist',
 };
-
-const PERSONAS = Object.keys(PERSONA_LABELS) as Persona[];
 
 const TIER_COLORS: Record<RoastLevel, string> = {
   mild: '#4DA6FF',
@@ -88,17 +88,25 @@ const TIER_SHADOW: Record<RoastLevel, { color: string; radius: number }> = {
   nuclear: { color: 'rgba(0,0,0,0.8)', radius: 4 },
 };
 
-const TIER_GRADIENT: Record<RoastLevel, [string, string, string]> = {
-  mild: ['rgba(0,0,0,0.45)', 'rgba(0,0,0,0.0)', 'rgba(0,0,0,0.78)'],
-  medium: ['rgba(0,0,0,0.55)', 'rgba(0,0,0,0.04)', 'rgba(0,0,0,0.84)'],
-  savage: ['rgba(0,0,0,0.62)', 'rgba(0,0,0,0.12)', 'rgba(0,0,0,0.9)'],
-  nuclear: ['rgba(0,0,0,0.7)', 'rgba(0,0,0,0.25)', 'rgba(0,0,0,0.92)'],
+const TIER_GRADIENT: Record<RoastLevel, [string, string, string, string]> = {
+  mild:    ['transparent', 'rgba(0,0,0,0.20)', 'rgba(0,0,0,0.50)', 'rgba(0,0,0,0.40)'],
+  medium:  ['transparent', 'rgba(0,0,0,0.25)', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.45)'],
+  savage:  ['transparent', 'rgba(0,0,0,0.30)', 'rgba(0,0,0,0.62)', 'rgba(0,0,0,0.50)'],
+  nuclear: ['transparent', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.70)', 'rgba(0,0,0,0.55)'],
 };
 
 // Nuclear gets a second vignette layer for a noticeably darker center band
 const NUCLEAR_VIGNETTE: [string, string, string] = [
   'transparent', 'rgba(0,0,0,0.18)', 'transparent',
 ];
+
+// Soft gradient behind roast text — stronger at savage/nuclear for readability
+const VERDICT_BACKDROP: Record<RoastLevel, [string, string, string]> = {
+  mild:    ['rgba(0,0,0,0.08)', 'rgba(0,0,0,0.30)', 'rgba(0,0,0,0.08)'],
+  medium:  ['rgba(0,0,0,0.10)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.10)'],
+  savage:  ['rgba(0,0,0,0.12)', 'rgba(0,0,0,0.42)', 'rgba(0,0,0,0.12)'],
+  nuclear: ['rgba(0,0,0,0.14)', 'rgba(0,0,0,0.48)', 'rgba(0,0,0,0.14)'],
+};
 
 const TIER_ANIM_DURATION: Record<RoastLevel, number> = {
   mild: 400,
@@ -120,15 +128,28 @@ function splitSentences(text: string): string[] {
   return parts.map((p, i) => (i < parts.length - 1 && !p.endsWith('.') ? p + '.' : p));
 }
 
+// Resize/compress before sending to the API to reduce payload size and latency.
+async function getOptimizedBase64(uri: string): Promise<string> {
+  const result = await manipulateAsync(
+    uri,
+    [{ resize: { width: 1080 } }],
+    { compress: 0.75, format: SaveFormat.JPEG },
+  );
+  const file = new File(result.uri);
+  return file.base64();
+}
+
 export default function PreviewScreen() {
-  const { uri } = useLocalSearchParams<{ uri: string }>();
+  const params = useLocalSearchParams<{ uri: string; level: string; persona: string; source: string }>();
+  const uri = params.uri;
+  const source = (params.source as 'camera' | 'upload') || 'camera';
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [roasts, setRoasts] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [level, setLevel] = useState<RoastLevel>('medium');
-  const [persona, setPersona] = useState<Persona>('default');
+  const [level, setLevel] = useState<RoastLevel>((params.level as RoastLevel) || 'medium');
+  const [persona] = useState<Persona>((params.persona as Persona) || 'default');
   const [shareMode, setShareMode] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
@@ -141,6 +162,7 @@ export default function PreviewScreen() {
 
   // Entrance: fade in dark overlay on mount
   useEffect(() => {
+    track('preview_viewed', { level, persona });
     Animated.timing(overlayAnim, {
       toValue: 1,
       duration: 200,
@@ -197,13 +219,14 @@ export default function PreviewScreen() {
     }
 
     if (level === 'nuclear') {
+      track('nuclear_prompt_shown', { persona });
       const confirmed = await new Promise<boolean>((resolve) =>
         Alert.alert(
           'Nuclear mode is experimental. Proceed?',
           undefined,
           [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Proceed', style: 'destructive', onPress: () => resolve(true) },
+            { text: 'Cancel', style: 'cancel', onPress: () => { track('nuclear_cancelled', { persona }); resolve(false); } },
+            { text: 'Proceed', style: 'destructive', onPress: () => { track('nuclear_confirmed', { persona }); resolve(true); } },
           ],
         ),
       );
@@ -214,8 +237,7 @@ export default function PreviewScreen() {
     setError(null);
 
     try {
-      const file = new File(uri);
-      const base64 = await file.base64();
+      const base64 = await getOptimizedBase64(uri);
 
       const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
@@ -235,8 +257,10 @@ export default function PreviewScreen() {
 
       setRoasts(data.roasts);
       await recordRoast(level);
+      track('roast_generated', { level, persona, source });
     } catch (err) {
       console.error('Roast error:', err);
+      track('roast_failed', { level, persona, source });
       if (err instanceof TypeError && err.message.includes('Network request failed')) {
         setError('Cannot connect to server. Make sure the backend is running.');
       } else {
@@ -253,13 +277,14 @@ export default function PreviewScreen() {
     if (!nextLevel) return;
 
     if (nextLevel === 'nuclear') {
+      track('nuclear_prompt_shown', { persona });
       const confirmed = await new Promise<boolean>((resolve) =>
         Alert.alert(
           'Nuclear mode is experimental. Proceed?',
           undefined,
           [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Proceed', style: 'destructive', onPress: () => resolve(true) },
+            { text: 'Cancel', style: 'cancel', onPress: () => { track('nuclear_cancelled', { persona }); resolve(false); } },
+            { text: 'Proceed', style: 'destructive', onPress: () => { track('nuclear_confirmed', { persona }); resolve(true); } },
           ],
         ),
       );
@@ -278,8 +303,7 @@ export default function PreviewScreen() {
     setError(null);
 
     try {
-      const file = new File(uri!);
-      const base64 = await file.base64();
+      const base64 = await getOptimizedBase64(uri!);
 
       const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
@@ -299,8 +323,10 @@ export default function PreviewScreen() {
 
       setRoasts(data.roasts);
       await recordRoast(nextLevel);
+      track('roast_generated', { level: nextLevel, persona, source });
     } catch (err) {
       console.error('Roast error:', err);
+      track('roast_failed', { level: nextLevel, persona, source });
       if (err instanceof TypeError && err.message.includes('Network request failed')) {
         setError('Cannot connect to server. Make sure the backend is running.');
       } else {
@@ -311,7 +337,7 @@ export default function PreviewScreen() {
     }
   };
 
-  const retake = () => router.replace('/camera');
+  const retake = () => router.replace({ pathname: '/camera', params: { level, persona } });
   const goHome = () => router.replace('/');
 
   const handleShare = async () => {
@@ -388,7 +414,7 @@ export default function PreviewScreen() {
         <Animated.View style={[styles.gradient, { opacity: overlayAnim }]}>
           <LinearGradient
             colors={TIER_GRADIENT[level]}
-            locations={[0, 0.35, 1]}
+            locations={[0, 0.35, 0.6, 1]}
             style={StyleSheet.absoluteFillObject}
           />
           {/* Nuclear extra vignette — darker center band */}
@@ -400,11 +426,6 @@ export default function PreviewScreen() {
             />
           )}
         </Animated.View>
-
-        {/* Tier badge — top left */}
-        <View style={[styles.tierBadge, { top: insets.top + 12, backgroundColor: TIER_COLORS[level] }]}>
-          <Text style={styles.tierBadgeText}>{level.toUpperCase()}</Text>
-        </View>
 
         {/* ── Verdict zone: roast text / loading / error ── */}
         <View style={[styles.verdictContainer, { bottom: CONTROLS_HEIGHT + controlsBottom }]}>
@@ -429,11 +450,16 @@ export default function PreviewScreen() {
                 { opacity: roastOpacity, transform: [{ translateY: roastTranslateY }, { scale: scaleAnim }] },
               ]}
             >
+              <LinearGradient
+                colors={VERDICT_BACKDROP[level]}
+                locations={[0, 0.5, 1]}
+                style={styles.verdictBackdrop}
+              />
               {renderRoastText()}
             </Animated.View>
           ) : (
             <Text style={styles.placeholderText}>
-              Select your roast level{'\n'}and tap Generate
+              Tap Generate to get roasted
             </Text>
           )}
         </View>
@@ -445,47 +471,20 @@ export default function PreviewScreen() {
             <Text style={[styles.watermarkLine2, { color: TIER_COLORS[level] + 'CC' }]}>
               {level.toUpperCase()}
             </Text>
+            <Text style={styles.watermarkPersona}>{PERSONA_LABELS[persona]}</Text>
           </View>
         )}
       </ViewShot>
 
-      {/* Level selector — outside capture ref */}
-      {!hasRoast && !isLoading && !error && (
-        <View style={[styles.levelSelector, { top: insets.top + 60 }]}>
-          <View style={styles.levelButtons}>
-            {(['mild', 'medium', 'savage', 'nuclear'] as RoastLevel[]).map((l) => (
-              <Pressable
-                key={l}
-                style={[
-                  styles.levelButton,
-                  level === l && { backgroundColor: TIER_COLORS[l], borderColor: TIER_COLORS[l] },
-                ]}
-                onPress={() => setLevel(l)}
-              >
-                <Text style={[styles.levelButtonText, level === l && styles.levelButtonTextActive]}>
-                  {l.charAt(0).toUpperCase() + l.slice(1)}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-          <View style={styles.personaRow}>
-            {PERSONAS.map((p) => (
-              <Pressable
-                key={p}
-                style={[
-                  styles.personaButton,
-                  persona === p && styles.personaButtonActive,
-                ]}
-                onPress={() => setPersona(p)}
-              >
-                <Text style={[styles.personaButtonText, persona === p && styles.personaButtonTextActive]}>
-                  {PERSONA_LABELS[p]}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
+      {/* Selection badges — read-only display of chosen level + persona */}
+      <View style={[styles.selectionBadges, { top: insets.top + 12 }]}>
+        <View style={[styles.selectionBadge, { backgroundColor: TIER_COLORS[level] }]}>
+          <Text style={styles.selectionBadgeText}>{level.toUpperCase()}</Text>
         </View>
-      )}
+        <View style={styles.selectionBadge}>
+          <Text style={styles.selectionBadgeText}>{PERSONA_LABELS[persona]}</Text>
+        </View>
+      </View>
 
       {/* ── Controls zone: buttons anchored at bottom — outside capture ref ── */}
       <View style={[styles.controlsContainer, { bottom: controlsBottom }]}>
@@ -514,7 +513,7 @@ export default function PreviewScreen() {
                   { backgroundColor: TIER_BUTTON_COLORS[level], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
                   pressed && !isLoading && styles.buttonPressed,
                 ]}
-                onPress={() => generateRoast()}
+                onPress={() => { track('roast_again_tapped', { level, persona }); generateRoast(); }}
                 disabled={isLoading}
               >
                 <Text style={styles.generateButtonText}>
@@ -529,7 +528,7 @@ export default function PreviewScreen() {
                     { backgroundColor: TIER_BUTTON_COLORS[NEXT_TIER[level]!], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
                     pressed && !isLoading && styles.buttonPressed,
                   ]}
-                  onPress={handleRoastHarder}
+                  onPress={() => { track('roast_harder_tapped', { level, persona }); handleRoastHarder(); }}
                   disabled={isLoading}
                 >
                   <Text style={styles.generateButtonText}>Roast Harder</Text>
@@ -542,7 +541,7 @@ export default function PreviewScreen() {
                 { opacity: TIER_BUTTON_OPACITY[level] },
                 pressed && styles.buttonPressed,
               ]}
-              onPress={retake}
+              onPress={() => { track('retake_photo_tapped', { level, persona }); retake(); }}
               disabled={isLoading}
             >
               <Text style={styles.secondaryButtonText}>Retake Photo</Text>
@@ -552,13 +551,13 @@ export default function PreviewScreen() {
                 styles.shareButton,
                 pressed && styles.buttonPressed,
               ]}
-              onPress={handleShare}
+              onPress={() => { track('share_tapped', { level, persona }); handleShare(); }}
             >
               <Text style={styles.shareButtonText}>Share Roast</Text>
             </Pressable>
           </>
         ) : null}
-        <Pressable style={styles.linkButton} onPress={goHome} disabled={isLoading}>
+        <Pressable style={styles.linkButton} onPress={() => { track('back_home_tapped'); goHome(); }} disabled={isLoading}>
           <Text style={[styles.linkButtonText, isLoading && styles.textDisabled]}>
             Back to Home
           </Text>
@@ -596,76 +595,25 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
   },
 
-  // Tier badge
-  tierBadge: {
+  // Selection badges (level + persona, read-only)
+  selectionBadges: {
     position: 'absolute',
-    left: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 20,
-    zIndex: 10,
-  },
-  tierBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-  },
-
-  // Level selector
-  levelSelector: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 10,
-  },
-  levelButtons: {
+    right: 16,
     flexDirection: 'row',
     gap: 8,
+    zIndex: 10,
   },
-  levelButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.4)',
-  },
-  levelButtonText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  levelButtonTextActive: {
-    color: '#fff',
-  },
-
-  // Persona selector
-  personaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 6,
-    marginTop: 10,
-  },
-  personaButton: {
+  selectionBadge: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
+    borderRadius: 20,
   },
-  personaButtonActive: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderColor: 'rgba(255,255,255,0.7)',
-  },
-  personaButtonText: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  personaButtonTextActive: {
+  selectionBadgeText: {
     color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
 
   // ── Verdict zone ──
@@ -673,7 +621,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 24,
     right: 24,
-    top: '30%',
+    top: '35%',
     justifyContent: 'flex-end',
     zIndex: 10,
   },
@@ -683,8 +631,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     maxWidth: 360,
     alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.18)',
     borderRadius: 16,
+    overflow: 'hidden',
     paddingHorizontal: 20,
     paddingVertical: 12,
   },
@@ -693,11 +641,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
   },
   roastTextContainerNuclear: {
-    backgroundColor: 'rgba(35,0,0,0.14)',
     borderTopWidth: 1,
     borderTopColor: 'rgba(120,0,0,0.35)',
     paddingVertical: 9,
     paddingHorizontal: 16,
+  },
+  verdictBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 16,
   },
   roastText: {
     color: '#fff',
@@ -853,5 +804,11 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     fontWeight: '600',
     marginTop: 2,
+  },
+  watermarkPersona: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 4,
   },
 });

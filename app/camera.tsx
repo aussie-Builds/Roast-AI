@@ -1,12 +1,19 @@
-import { useRef } from 'react';
-import { StyleSheet, View, Pressable, Text } from 'react-native';
+import { useRef, useEffect } from 'react';
+import { StyleSheet, View, Pressable, Text, Alert } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useRouter } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { track } from '@/utils/analytics';
 
 export default function CameraScreen() {
   const router = useRouter();
+  const { level, persona } = useLocalSearchParams<{ level: string; persona: string }>();
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
+
+  useEffect(() => {
+    track('camera_opened', { level, persona });
+  }, []);
 
   if (!permission) {
     return <View style={styles.container} />;
@@ -26,11 +33,30 @@ export default function CameraScreen() {
     );
   }
 
+  const pickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Please allow photo library access to upload a photo.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 1,
+    });
+
+    if (!result.canceled && result.assets.length > 0) {
+      track('photo_uploaded', { level, persona });
+      router.push({ pathname: '/preview', params: { uri: result.assets[0].uri, level, persona, source: 'upload' } });
+    }
+  };
+
   const takePicture = async () => {
     if (cameraRef.current) {
       const photo = await cameraRef.current.takePictureAsync();
       if (photo) {
-        router.push({ pathname: '/preview', params: { uri: photo.uri } });
+        track('photo_taken', { level, persona });
+        router.push({ pathname: '/preview', params: { uri: photo.uri, level, persona, source: 'camera' } });
       }
     }
   };
@@ -48,6 +74,12 @@ export default function CameraScreen() {
               onPress={takePicture}
             >
               <View style={styles.captureButtonInner} />
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.uploadButton, pressed && styles.uploadButtonPressed]}
+              onPress={pickImage}
+            >
+              <Text style={styles.uploadButtonText}>Upload Photo</Text>
             </Pressable>
           </View>
         </View>
@@ -102,6 +134,22 @@ const styles = StyleSheet.create({
   },
   captureButtonPressed: {
     backgroundColor: 'rgba(255,255,255,0.5)',
+  },
+  uploadButton: {
+    marginTop: 20,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.5)',
+  },
+  uploadButtonPressed: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  uploadButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
   captureButtonInner: {
     width: 64,

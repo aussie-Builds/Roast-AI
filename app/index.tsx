@@ -1,16 +1,39 @@
-import { StyleSheet, Pressable, View, Text } from 'react-native';
+import { useState, useEffect } from 'react';
+import { StyleSheet, Pressable, View, Text, ScrollView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { track } from '@/utils/analytics';
 
-const TIER_HINTS = [
-  { label: 'MILD', color: '#4DA6FF' },
-  { label: 'MEDIUM', color: '#FF9F0A' },
-  { label: 'SAVAGE', color: '#FF3B30' },
-  { label: 'NUCLEAR', color: '#8B0000' },
-] as const;
+type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
+type Persona = 'default' | 'butler' | 'mean_girl' | 'gym_bro' | 'anime_villain' | 'therapist';
+
+const TIER_COLORS: Record<RoastLevel, string> = {
+  mild: '#4DA6FF',
+  medium: '#FF9F0A',
+  savage: '#FF3B30',
+  nuclear: '#8B0000',
+};
+
+const PERSONA_LABELS: Record<Persona, string> = {
+  default: '🔥 Default',
+  butler: '🎩 Butler',
+  mean_girl: '💅 Mean Girl',
+  gym_bro: '💪 Gym Bro',
+  anime_villain: '🦹 Villain',
+  therapist: '🧠 Therapist',
+};
+
+const LEVELS: RoastLevel[] = ['mild', 'medium', 'savage', 'nuclear'];
+const PERSONAS = Object.keys(PERSONA_LABELS) as Persona[];
 
 export default function HomeScreen() {
   const router = useRouter();
+  const [level, setLevel] = useState<RoastLevel>('medium');
+  const [persona, setPersona] = useState<Persona>('default');
+
+  useEffect(() => {
+    track('home_viewed');
+  }, []);
 
   return (
     <LinearGradient colors={['#0f0f12', '#140c0f']} style={styles.container}>
@@ -18,22 +41,55 @@ export default function HomeScreen() {
         <Text style={styles.title}>Confidence test.</Text>
         <Text style={styles.subtitle}>Choose your level. Take the hit.</Text>
 
-        {/* Escalation indicator — visual only */}
+        {/* Level selector */}
         <View style={styles.tierRow}>
-          {TIER_HINTS.map((t, i) => (
-            <View key={t.label} style={styles.tierItem}>
-              {i > 0 && <Text style={styles.tierDot}>{'\u00B7'}</Text>}
-              <Text style={[styles.tierLabel, { color: t.color }]}>{t.label}</Text>
-            </View>
+          {LEVELS.map((l) => (
+            <Pressable
+              key={l}
+              style={[
+                styles.tierButton,
+                level === l && { backgroundColor: TIER_COLORS[l], borderColor: TIER_COLORS[l] },
+              ]}
+              onPress={() => { setLevel(l); track('level_selected', { level: l }); }}
+            >
+              <Text style={[styles.tierButtonText, level === l && styles.tierButtonTextActive]}>
+                {l.toUpperCase()}
+              </Text>
+            </Pressable>
           ))}
         </View>
-      </View>
 
-      {/* Button zone — kept separate for future persona section above it */}
-      <View style={styles.buttonZone}>
+        {/* Persona selector */}
+        <Text style={styles.personaLabel}>Choose your roaster</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.personaScroll}
+        >
+          {PERSONAS.map((p) => {
+            const [emoji, ...rest] = PERSONA_LABELS[p].split(' ');
+            return (
+              <Pressable
+                key={p}
+                style={[
+                  styles.personaCard,
+                  persona === p && styles.personaCardActive,
+                ]}
+                onPress={() => { setPersona(p); track('persona_selected', { persona: p }); }}
+              >
+                <Text style={styles.personaEmoji}>{emoji}</Text>
+                <Text style={[styles.personaCardText, persona === p && styles.personaCardTextActive]}>
+                  {rest.join(' ')}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        {/* Action button */}
         <Pressable
           style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
-          onPress={() => router.push('/camera')}
+          onPress={() => router.push({ pathname: '/camera', params: { level, persona } })}
         >
           <Text style={styles.buttonText}>Take a Selfie</Text>
         </Pressable>
@@ -67,35 +123,72 @@ const styles = StyleSheet.create({
     marginBottom: 28,
   },
 
-  // Escalation indicator
+  // Level selector
   tierRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 48,
+    gap: 8,
+    marginBottom: 20,
   },
-  tierItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  tierButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.3)',
   },
-  tierDot: {
-    color: 'rgba(255,255,255,0.25)',
-    fontSize: 14,
-    marginHorizontal: 8,
-  },
-  tierLabel: {
+  tierButtonText: {
+    color: 'rgba(255,255,255,0.5)',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1.4,
   },
+  tierButtonTextActive: {
+    color: '#fff',
+  },
+
+  // Persona selector
+  personaLabel: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    marginBottom: 12,
+  },
+  personaScroll: {
+    paddingHorizontal: 4,
+    marginBottom: 32,
+  },
+  personaCard: {
+    width: 110,
+    height: 100,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  personaCardActive: {
+    backgroundColor: '#1f1f1f',
+    borderColor: '#ff9800',
+    borderWidth: 2,
+  },
+  personaEmoji: {
+    fontSize: 28,
+    marginBottom: 6,
+  },
+  personaCardText: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  personaCardTextActive: {
+    color: '#fff',
+  },
 
   // Button
-  buttonZone: {
-    position: 'absolute',
-    bottom: 80,
-    left: 24,
-    right: 24,
-    alignItems: 'center',
-  },
   button: {
     backgroundColor: '#B11212',
     paddingHorizontal: 48,
