@@ -36,6 +36,15 @@ export async function identifyDevice(): Promise<void> {
   client?.identify(deviceId);
 }
 
+export async function getDeviceId(): Promise<string> {
+  let deviceId = await AsyncStorage.getItem(DEVICE_ID_KEY);
+  if (!deviceId) {
+    deviceId = generateUUID();
+    await AsyncStorage.setItem(DEVICE_ID_KEY, deviceId);
+  }
+  return deviceId;
+}
+
 export function track(event: string, properties?: Record<string, string>) {
   const client = getClient();
   client?.capture(event, properties);

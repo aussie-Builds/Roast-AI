@@ -20,7 +20,7 @@ import * as Sharing from 'expo-sharing';
 
 import { API_BASE_URL } from '@/constants/api';
 import { canRoast, recordRoast } from '@/utils/rateLimiter';
-import { track } from '@/utils/analytics';
+import { track, getDeviceId } from '@/utils/analytics';
 import UpgradeModal from '@/components/UpgradeModal';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
@@ -153,12 +153,18 @@ export default function PreviewScreen() {
   const [shareMode, setShareMode] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
+  const [deviceId, setDeviceId] = useState('');
   const animValue = useRef(new Animated.Value(0)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const viewShotRef = useRef<ViewShot>(null);
 
   const hasRoast = roasts.length > 0;
+
+  // Load device ID for analytics
+  useEffect(() => {
+    getDeviceId().then(setDeviceId);
+  }, []);
 
   // Entrance: fade in dark overlay on mount
   useEffect(() => {
@@ -513,7 +519,7 @@ export default function PreviewScreen() {
                   { backgroundColor: TIER_BUTTON_COLORS[level], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
                   pressed && !isLoading && styles.buttonPressed,
                 ]}
-                onPress={() => { track('roast_again_tapped', { level, persona }); generateRoast(); }}
+                onPress={() => { track('roast_again_pressed', { level, persona, device_id: deviceId }); generateRoast(); }}
                 disabled={isLoading}
               >
                 <Text style={styles.generateButtonText}>
@@ -528,7 +534,7 @@ export default function PreviewScreen() {
                     { backgroundColor: TIER_BUTTON_COLORS[NEXT_TIER[level]!], opacity: isLoading ? 0.5 : TIER_BUTTON_OPACITY[level] },
                     pressed && !isLoading && styles.buttonPressed,
                   ]}
-                  onPress={() => { track('roast_harder_tapped', { level, persona }); handleRoastHarder(); }}
+                  onPress={() => { track('roast_harder_pressed', { level, persona, device_id: deviceId }); handleRoastHarder(); }}
                   disabled={isLoading}
                 >
                   <Text style={styles.generateButtonText}>Roast Harder</Text>
@@ -541,7 +547,7 @@ export default function PreviewScreen() {
                 { opacity: TIER_BUTTON_OPACITY[level] },
                 pressed && styles.buttonPressed,
               ]}
-              onPress={() => { track('retake_photo_tapped', { level, persona }); retake(); }}
+              onPress={() => { track('retake_photo_pressed', { level, persona }); retake(); }}
               disabled={isLoading}
             >
               <Text style={styles.secondaryButtonText}>Retake Photo</Text>
@@ -551,13 +557,13 @@ export default function PreviewScreen() {
                 styles.shareButton,
                 pressed && styles.buttonPressed,
               ]}
-              onPress={() => { track('share_pressed'); track('share_tapped', { level, persona }); handleShare(); }}
+              onPress={() => { track('share_pressed', { level, persona }); handleShare(); }}
             >
               <Text style={styles.shareButtonText}>Share Roast</Text>
             </Pressable>
           </>
         ) : null}
-        <Pressable style={styles.linkButton} onPress={() => { track('back_home_tapped'); goHome(); }} disabled={isLoading}>
+        <Pressable style={styles.linkButton} onPress={() => { track('back_home_pressed'); goHome(); }} disabled={isLoading}>
           <Text style={[styles.linkButtonText, isLoading && styles.textDisabled]}>
             Back to Home
           </Text>
