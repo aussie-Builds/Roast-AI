@@ -5,15 +5,41 @@ type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 const KEYS = {
   dailyCount: '@roast_daily_count',
   dailyStart: '@roast_daily_start',
-  savageUsed: '@roast_savage_used',
+  savageCount: '@roast_savage_count',
   savageStart: '@roast_savage_start',
   premium: '@roast_premium',
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const WEEK_MS = 7 * DAY_MS;
 
-const DEV_UNLOCK = true; // DEV TEST ONLY – remove before production
+const DEV_UNLOCK = false; // Set true to bypass all limits
+
+// ── Rate limit profiles ─────────────────────────────────────────────
+// Switch ACTIVE_PROFILE to change limits across the app.
+
+type LimitProfile = {
+  dailyMildMedium: number;   // mild+medium shared pool per day
+  savagePerDay: number;      // savage roasts per day
+  nuclearAllowed: boolean;   // whether nuclear is available
+};
+
+const PROFILES: Record<string, LimitProfile> = {
+  tester: {
+    dailyMildMedium: 25,
+    savagePerDay: 10,
+    nuclearAllowed: true,
+  },
+  production: {
+    dailyMildMedium: 3,
+    savagePerDay: 1,
+    nuclearAllowed: false,
+  },
+};
+
+const ACTIVE_PROFILE: string = 'tester';
+const LIMITS = PROFILES[ACTIVE_PROFILE];
+
+// ── Public API ───────────────────────────────────────────────────────
 
 export async function canRoast(
   level: RoastLevel,
@@ -23,26 +49,32 @@ export async function canRoast(
   if (isPremiumEffective) return { allowed: true };
 
   if (level === 'nuclear') {
-    return { allowed: false, reason: 'Nuclear mode is premium only' };
+    if (!LIMITS.nuclearAllowed) {
+      return { allowed: false, reason: 'Nuclear mode is premium only' };
+    }
+    return { allowed: true };
   }
 
   if (level === 'savage') {
-    const [start, used] = await AsyncStorage.multiGet([
+    const [start, count] = await AsyncStorage.multiGet([
       KEYS.savageStart,
-      KEYS.savageUsed,
+      KEYS.savageCount,
     ]);
     const startVal = start[1];
-    const usedVal = used[1];
+    const countVal = parseInt(count[1] ?? '0', 10);
 
-    if (startVal && usedVal === 'true') {
+    if (startVal) {
       const elapsed = Date.now() - new Date(startVal).getTime();
-      if (elapsed < WEEK_MS) {
-        const remaining = WEEK_MS - elapsed;
-        const days = Math.ceil(remaining / DAY_MS);
-        return {
-          allowed: false,
-          reason: `You've used your weekly Savage roast. Resets in ${days} day${days !== 1 ? 's' : ''}.`,
-        };
+      if (elapsed < DAY_MS) {
+        if (countVal >= LIMITS.savagePerDay) {
+          const remaining = DAY_MS - elapsed;
+          const hours = Math.ceil(remaining / (60 * 60 * 1000));
+          return {
+            allowed: false,
+            reason: `You've used all ${LIMITS.savagePerDay} Savage roast${LIMITS.savagePerDay !== 1 ? 's' : ''} today. Resets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
+          };
+        }
+        return { allowed: true };
       }
     }
     return { allowed: true };
@@ -59,17 +91,16 @@ export async function canRoast(
   if (startVal) {
     const elapsed = Date.now() - new Date(startVal).getTime();
     if (elapsed < DAY_MS) {
-      if (countVal >= 3) {
+      if (countVal >= LIMITS.dailyMildMedium) {
         const remaining = DAY_MS - elapsed;
         const hours = Math.ceil(remaining / (60 * 60 * 1000));
         return {
           allowed: false,
-          reason: `You've used all 3 daily roasts. Resets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
+          reason: `You've used all ${LIMITS.dailyMildMedium} daily roasts. Resets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
         };
       }
       return { allowed: true };
     }
-    // Window expired — will reset on next recordRoast
   }
 
   return { allowed: true };
@@ -81,11 +112,18 @@ export async function recordRoast(level: RoastLevel): Promise<void> {
   if (level === 'savage') {
     const existing = await AsyncStorage.getItem(KEYS.savageStart);
     const withinWindow =
-      existing && Date.now() - new Date(existing).getTime() < WEEK_MS;
-    await AsyncStorage.multiSet([
-      [KEYS.savageUsed, 'true'],
-      ...(withinWindow ? [] : [[KEYS.savageStart, new Date().toISOString()]]),
-    ] as [string, string][]);
+      existing && Date.now() - new Date(existing).getTime() < DAY_MS;
+
+    if (withinWindow) {
+      const raw = await AsyncStorage.getItem(KEYS.savageCount);
+      const current = parseInt(raw ?? '0', 10);
+      await AsyncStorage.setItem(KEYS.savageCount, String(current + 1));
+    } else {
+      await AsyncStorage.multiSet([
+        [KEYS.savageStart, new Date().toISOString()],
+        [KEYS.savageCount, '1'],
+      ]);
+    }
     return;
   }
 
