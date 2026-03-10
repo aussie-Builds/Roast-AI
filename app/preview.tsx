@@ -473,7 +473,7 @@ export default function PreviewScreen() {
         {/* Watermark — only visible during share capture */}
         {shareMode && (
           <View style={styles.watermark}>
-            <Text style={styles.watermarkLine1}>CONFIDENCE TEST</Text>
+            <Text style={styles.watermarkLine1}>🔥 Roast AI</Text>
             <Text style={[styles.watermarkLine2, { color: TIER_COLORS[level] + 'CC' }]}>
               {level.toUpperCase()}
             </Text>
