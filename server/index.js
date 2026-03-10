@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
 import sharp from 'sharp';
+import rateLimit from 'express-rate-limit';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,6 +37,17 @@ app.use((err, req, res, next) => {
 function jsonError(res, status, error, message) {
   return res.status(status).type('application/json').json({ error, message });
 }
+
+// Rate limiter for roast endpoints: 10 requests per minute per IP
+const roastLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate_limited', message: 'Too many requests. Please try again later.' },
+});
+app.use('/api/roast', roastLimiter);
+app.use('/api/roast-v3', roastLimiter);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });

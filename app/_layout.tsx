@@ -5,12 +5,13 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { track } from '@/utils/analytics';
+import { track, identifyDevice } from '@/utils/analytics';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
 
   useEffect(() => {
+    identifyDevice();
     track('app_opened');
   }, []);
 

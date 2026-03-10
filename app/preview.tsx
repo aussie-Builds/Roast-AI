@@ -551,7 +551,7 @@ export default function PreviewScreen() {
                 styles.shareButton,
                 pressed && styles.buttonPressed,
               ]}
-              onPress={() => { track('share_tapped', { level, persona }); handleShare(); }}
+              onPress={() => { track('share_pressed'); track('share_tapped', { level, persona }); handleShare(); }}
             >
               <Text style={styles.shareButtonText}>Share Roast</Text>
             </Pressable>
