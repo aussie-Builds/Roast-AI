@@ -17,6 +17,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
 
 import { API_BASE_URL } from '@/constants/api';
 import { canRoast, recordRoast } from '@/utils/rateLimiter';
@@ -102,10 +103,10 @@ const NUCLEAR_VIGNETTE: [string, string, string] = [
 
 // Soft gradient behind roast text — stronger at savage/nuclear for readability
 const VERDICT_BACKDROP: Record<RoastLevel, [string, string, string]> = {
-  mild:    ['rgba(0,0,0,0.08)', 'rgba(0,0,0,0.30)', 'rgba(0,0,0,0.08)'],
-  medium:  ['rgba(0,0,0,0.10)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.10)'],
-  savage:  ['rgba(0,0,0,0.12)', 'rgba(0,0,0,0.42)', 'rgba(0,0,0,0.12)'],
-  nuclear: ['rgba(0,0,0,0.14)', 'rgba(0,0,0,0.48)', 'rgba(0,0,0,0.14)'],
+  mild:    ['rgba(0,0,0,0.15)', 'rgba(0,0,0,0.45)', 'rgba(0,0,0,0.15)'],
+  medium:  ['rgba(0,0,0,0.18)', 'rgba(0,0,0,0.50)', 'rgba(0,0,0,0.18)'],
+  savage:  ['rgba(0,0,0,0.22)', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.22)'],
+  nuclear: ['rgba(0,0,0,0.25)', 'rgba(0,0,0,0.60)', 'rgba(0,0,0,0.25)'],
 };
 
 const TIER_ANIM_DURATION: Record<RoastLevel, number> = {
@@ -224,21 +225,6 @@ export default function PreviewScreen() {
       return;
     }
 
-    if (level === 'nuclear') {
-      track('nuclear_prompt_shown', { persona });
-      const confirmed = await new Promise<boolean>((resolve) =>
-        Alert.alert(
-          'Nuclear mode is experimental. Proceed?',
-          undefined,
-          [
-            { text: 'Cancel', style: 'cancel', onPress: () => { track('nuclear_cancelled', { persona }); resolve(false); } },
-            { text: 'Proceed', style: 'destructive', onPress: () => { track('nuclear_confirmed', { persona }); resolve(true); } },
-          ],
-        ),
-      );
-      if (!confirmed) return;
-    }
-
     setIsLoading(true);
     setError(null);
 
@@ -281,21 +267,6 @@ export default function PreviewScreen() {
     if (isLoading) return;
     const nextLevel = NEXT_TIER[level];
     if (!nextLevel) return;
-
-    if (nextLevel === 'nuclear') {
-      track('nuclear_prompt_shown', { persona });
-      const confirmed = await new Promise<boolean>((resolve) =>
-        Alert.alert(
-          'Nuclear mode is experimental. Proceed?',
-          undefined,
-          [
-            { text: 'Cancel', style: 'cancel', onPress: () => { track('nuclear_cancelled', { persona }); resolve(false); } },
-            { text: 'Proceed', style: 'destructive', onPress: () => { track('nuclear_confirmed', { persona }); resolve(true); } },
-          ],
-        ),
-      );
-      if (!confirmed) return;
-    }
 
     const check = await canRoast(nextLevel);
     if (!check.allowed) {
@@ -355,6 +326,28 @@ export default function PreviewScreen() {
       await Sharing.shareAsync(uri);
     } catch (err) {
       console.log(err);
+    } finally {
+      setShareMode(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!viewShotRef.current?.capture) return;
+    const { status } = await MediaLibrary.requestPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Please allow photo library access to save the roast.');
+      return;
+    }
+    setShareMode(true);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      const capturedUri = await viewShotRef.current.capture();
+      await MediaLibrary.saveToLibraryAsync(capturedUri);
+      track('save_pressed', { level, persona });
+      Alert.alert('Saved', 'Roast saved to gallery');
+    } catch (err) {
+      console.log(err);
+      Alert.alert('Error', 'Failed to save image');
     } finally {
       setShareMode(false);
     }
@@ -470,27 +463,37 @@ export default function PreviewScreen() {
           )}
         </View>
 
+        {/* Selection badges — inside capture so they appear in shared screenshots */}
+        <View style={[styles.selectionBadges, { top: insets.top + 12 }]}>
+          <View style={[styles.selectionBadge, { backgroundColor: TIER_COLORS[level] }]}>
+            <Text style={styles.selectionBadgeText}>{level.toUpperCase()}</Text>
+          </View>
+          <View style={styles.selectionBadge}>
+            <Text style={styles.selectionBadgeText}>{PERSONA_LABELS[persona]}</Text>
+          </View>
+        </View>
+
         {/* Watermark — only visible during share capture */}
         {shareMode && (
-          <View style={styles.watermark}>
-            <Text style={styles.watermarkLine1}>🔥 Roast AI</Text>
-            <Text style={[styles.watermarkLine2, { color: TIER_COLORS[level] + 'CC' }]}>
-              {level.toUpperCase()}
-            </Text>
-            <Text style={styles.watermarkPersona}>{PERSONA_LABELS[persona]}</Text>
-          </View>
+          <>
+            <LinearGradient
+              colors={['transparent', 'rgba(0,0,0,0.6)']}
+              style={styles.watermarkGradient}
+            />
+            <View style={styles.watermark}>
+              <View style={styles.watermarkRow}>
+                <Text style={styles.watermarkBrand}>ROAST AI</Text>
+                <View style={styles.watermarkDot} />
+                <Text style={[styles.watermarkLevel, { color: TIER_COLORS[level] }]}>
+                  {level.toUpperCase()}
+                </Text>
+                <View style={styles.watermarkDot} />
+                <Text style={styles.watermarkPersona}>{PERSONA_LABELS[persona]}</Text>
+              </View>
+            </View>
+          </>
         )}
       </ViewShot>
-
-      {/* Selection badges — read-only display of chosen level + persona */}
-      <View style={[styles.selectionBadges, { top: insets.top + 12 }]}>
-        <View style={[styles.selectionBadge, { backgroundColor: TIER_COLORS[level] }]}>
-          <Text style={styles.selectionBadgeText}>{level.toUpperCase()}</Text>
-        </View>
-        <View style={styles.selectionBadge}>
-          <Text style={styles.selectionBadgeText}>{PERSONA_LABELS[persona]}</Text>
-        </View>
-      </View>
 
       {/* ── Controls zone: buttons anchored at bottom — outside capture ref ── */}
       <View style={[styles.controlsContainer, { bottom: controlsBottom }]}>
@@ -552,15 +555,28 @@ export default function PreviewScreen() {
             >
               <Text style={styles.secondaryButtonText}>Retake Photo</Text>
             </Pressable>
-            <Pressable
-              style={({ pressed }) => [
-                styles.shareButton,
-                pressed && styles.buttonPressed,
-              ]}
-              onPress={() => { track('share_pressed', { level, persona }); handleShare(); }}
-            >
-              <Text style={styles.shareButtonText}>Share Roast</Text>
-            </Pressable>
+            <View style={styles.shareRow}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.shareButton,
+                  styles.shareRowItem,
+                  pressed && styles.buttonPressed,
+                ]}
+                onPress={() => { track('share_pressed', { level, persona }); handleShare(); }}
+              >
+                <Text style={styles.shareButtonText}>Share Roast</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.shareButton,
+                  styles.shareRowItem,
+                  pressed && styles.buttonPressed,
+                ]}
+                onPress={handleSave}
+              >
+                <Text style={styles.shareButtonText}>Save Roast</Text>
+              </Pressable>
+            </View>
           </>
         ) : null}
         <Pressable style={styles.linkButton} onPress={() => { track('back_home_pressed'); goHome(); }} disabled={isLoading}>
@@ -635,12 +651,12 @@ const styles = StyleSheet.create({
   // Roast text
   roastTextContainer: {
     alignItems: 'center',
-    maxWidth: 360,
+    maxWidth: SCREEN_WIDTH - 48,
     alignSelf: 'center',
     borderRadius: 16,
     overflow: 'hidden',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
   },
   roastTextContainerSavage: {
     paddingVertical: 10,
@@ -659,12 +675,12 @@ const styles = StyleSheet.create({
   roastText: {
     color: '#fff',
     fontSize: BASE_FONT_SIZE,
-    fontWeight: '700',
+    fontWeight: '800',
     textAlign: 'center',
     lineHeight: BASE_FONT_SIZE + 10,
-    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowColor: 'rgba(0,0,0,0.9)',
     textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 4,
+    textShadowRadius: 6,
   },
 
   // Loading
@@ -777,44 +793,75 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
 
-  // Share button
+  // Share / Save row
+  shareRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  shareRowItem: {
+    flex: 1,
+  },
   shareButton: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.3)',
-    paddingVertical: 11,
+    borderColor: 'rgba(255,255,255,0.35)',
+    paddingVertical: 12,
     borderRadius: 14,
     alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 6,
   },
   shareButtonText: {
     color: '#fff',
-    fontSize: 15,
-    fontWeight: '500',
+    fontSize: 16,
+    fontWeight: '600',
   },
 
   // Watermark (visible only during share capture)
+  watermarkGradient: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 100,
+  },
   watermark: {
     position: 'absolute',
-    bottom: 24,
+    bottom: 20,
     left: 0,
     right: 0,
     alignItems: 'center',
   },
-  watermarkLine1: {
-    fontSize: 12,
-    letterSpacing: 2,
-    fontWeight: '600',
-    color: 'rgba(255,255,255,0.6)',
+  watermarkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    gap: 8,
   },
-  watermarkLine2: {
-    fontSize: 11,
-    letterSpacing: 3,
-    fontWeight: '600',
-    marginTop: 2,
+  watermarkBrand: {
+    fontSize: 13,
+    letterSpacing: 2,
+    fontWeight: '800',
+    color: 'rgba(255,255,255,0.85)',
+  },
+  watermarkDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: 'rgba(255,255,255,0.4)',
+  },
+  watermarkLevel: {
+    fontSize: 12,
+    letterSpacing: 1.5,
+    fontWeight: '700',
   },
   watermarkPersona: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: 'rgba(255,255,255,0.7)',
-    marginTop: 4,
   },
 });

@@ -1,4 +1,7 @@
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useState } from 'react';
+import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { purchasePremium } from '@/utils/purchases';
+import { track } from '@/utils/analytics';
 
 const BULLET_COLORS = ['#4DA6FF', '#FF9F0A', '#FF3B30'];
 
@@ -19,6 +22,23 @@ export default function UpgradeModal({
   reason,
   onClose,
 }: UpgradeModalProps) {
+  const [loading, setLoading] = useState(false);
+
+  const handleUpgrade = async () => {
+    setLoading(true);
+    track('upgrade_pressed');
+    try {
+      await purchasePremium();
+      // purchaseUpdatedListener in purchases.ts handles setIsPremium(true)
+      // Close modal after purchase flow completes (success or cancel)
+      onClose();
+    } catch {
+      Alert.alert('Purchase failed', 'Something went wrong. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <Modal
       visible={visible}
@@ -50,14 +70,23 @@ export default function UpgradeModal({
           <Pressable
             style={({ pressed }) => [
               styles.upgradeButton,
-              pressed && { opacity: 0.8 },
+              (pressed || loading) && { opacity: 0.8 },
             ]}
-            onPress={onClose}
+            onPress={handleUpgrade}
+            disabled={loading}
           >
-            <Text style={styles.upgradeButtonText}>
-              Upgrade (Coming Soon)
-            </Text>
+            {loading ? (
+              <ActivityIndicator color="#000" />
+            ) : (
+              <Text style={styles.upgradeButtonText}>
+                Subscribe to Premium
+              </Text>
+            )}
           </Pressable>
+
+          <Text style={styles.terms}>
+            Subscription renews automatically. Cancel anytime in Google Play.
+          </Text>
         </View>
       </Pressable>
     </Modal>
@@ -132,5 +161,12 @@ const styles = StyleSheet.create({
     color: '#000',
     fontSize: 16,
     fontWeight: '700',
+  },
+  terms: {
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 12,
+    lineHeight: 16,
   },
 });

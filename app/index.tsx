@@ -1,9 +1,8 @@
 import { useState, useEffect } from 'react';
-import { StyleSheet, Pressable, View, Text, ScrollView, Linking } from 'react-native';
+import { StyleSheet, Pressable, View, Text, ScrollView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import Constants from 'expo-constants';
-import { track, getDeviceId } from '@/utils/analytics';
+import { track } from '@/utils/analytics';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 type Persona = 'default' | 'butler' | 'mean_girl' | 'gym_bro' | 'anime_villain' | 'therapist';
@@ -31,27 +30,10 @@ export default function HomeScreen() {
   const router = useRouter();
   const [level, setLevel] = useState<RoastLevel>('medium');
   const [persona, setPersona] = useState<Persona>('default');
-  const [deviceId, setDeviceId] = useState('');
 
   useEffect(() => {
     track('home_viewed');
-    getDeviceId().then(setDeviceId);
   }, []);
-
-  const handleFeedback = () => {
-    track('feedback_pressed');
-    const appVersion = Constants.expoConfig?.version ?? 'unknown';
-    const body = [
-      'Roast AI Feedback\n',
-      `Device ID: ${deviceId}`,
-      `App Version: ${appVersion}`,
-      `Persona: ${persona}`,
-      `Level: ${level}`,
-      '\nDescribe the issue or suggestion here:\n',
-    ].join('\n');
-    const url = `mailto:?subject=${encodeURIComponent('Roast AI Feedback')}&body=${encodeURIComponent(body)}`;
-    Linking.openURL(url);
-  };
 
   return (
     <LinearGradient colors={['#0f0f12', '#140c0f']} style={styles.container}>
@@ -110,13 +92,6 @@ export default function HomeScreen() {
           onPress={() => router.push({ pathname: '/camera', params: { level, persona } })}
         >
           <Text style={styles.buttonText}>Take a Selfie</Text>
-        </Pressable>
-
-        <Pressable
-          style={({ pressed }) => [styles.feedbackButton, pressed && styles.buttonPressed]}
-          onPress={handleFeedback}
-        >
-          <Text style={styles.feedbackButtonText}>Send Feedback</Text>
         </Pressable>
       </View>
     </LinearGradient>
@@ -232,14 +207,5 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: '700',
-  },
-  feedbackButton: {
-    marginTop: 16,
-    paddingVertical: 10,
-  },
-  feedbackButtonText: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 13,
-    fontWeight: '600',
   },
 });

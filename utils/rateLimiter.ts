@@ -3,100 +3,64 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 
 const KEYS = {
-  dailyCount: '@roast_daily_count',
-  dailyStart: '@roast_daily_start',
-  savageCount: '@roast_savage_count',
-  savageStart: '@roast_savage_start',
   premium: '@roast_premium',
+  // Per-level keys generated dynamically: @roast_{level}_count, @roast_{level}_start
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const DEV_UNLOCK = false; // Set true to bypass all limits
-
-// ── Rate limit profiles ─────────────────────────────────────────────
-// Switch ACTIVE_PROFILE to change limits across the app.
-
-type LimitProfile = {
-  dailyMildMedium: number;   // mild+medium shared pool per day
-  savagePerDay: number;      // savage roasts per day
-  nuclearAllowed: boolean;   // whether nuclear is available
+// Daily limits per level for free users
+const DAILY_LIMITS: Record<RoastLevel, number> = {
+  mild: 5,
+  medium: 3,
+  savage: 1,
+  nuclear: 0, // locked for free users
 };
 
-const PROFILES: Record<string, LimitProfile> = {
-  tester: {
-    dailyMildMedium: 25,
-    savagePerDay: 10,
-    nuclearAllowed: true,
-  },
-  production: {
-    dailyMildMedium: 3,
-    savagePerDay: 1,
-    nuclearAllowed: false,
-  },
-};
+function levelKey(level: RoastLevel, suffix: 'count' | 'start'): string {
+  return `@roast_${level}_${suffix}`;
+}
 
-const ACTIVE_PROFILE: string = 'tester';
-const LIMITS = PROFILES[ACTIVE_PROFILE];
+// ── Premium flag ──────────────────────────────────────────────────────
+
+export async function getIsPremium(): Promise<boolean> {
+  const val = await AsyncStorage.getItem(KEYS.premium);
+  return val === 'true';
+}
+
+export async function setIsPremium(value: boolean): Promise<void> {
+  await AsyncStorage.setItem(KEYS.premium, value ? 'true' : 'false');
+}
 
 // ── Public API ───────────────────────────────────────────────────────
 
 export async function canRoast(
   level: RoastLevel,
 ): Promise<{ allowed: boolean; reason?: string }> {
-  const premium = await AsyncStorage.getItem(KEYS.premium);
-  const isPremiumEffective = DEV_UNLOCK || premium === 'true';
-  if (isPremiumEffective) return { allowed: true };
+  if (await getIsPremium()) return { allowed: true };
 
+  // Nuclear is premium-only
   if (level === 'nuclear') {
-    if (!LIMITS.nuclearAllowed) {
-      return { allowed: false, reason: 'Nuclear mode is premium only' };
-    }
-    return { allowed: true };
+    return { allowed: false, reason: '☢️ Nuclear roasts are Premium\n\nUnlimited roasts\nMaximum brutality' };
   }
 
-  if (level === 'savage') {
-    const [start, count] = await AsyncStorage.multiGet([
-      KEYS.savageStart,
-      KEYS.savageCount,
-    ]);
-    const startVal = start[1];
-    const countVal = parseInt(count[1] ?? '0', 10);
+  const limit = DAILY_LIMITS[level];
+  const startKey = levelKey(level, 'start');
+  const countKey = levelKey(level, 'count');
 
-    if (startVal) {
-      const elapsed = Date.now() - new Date(startVal).getTime();
-      if (elapsed < DAY_MS) {
-        if (countVal >= LIMITS.savagePerDay) {
-          const remaining = DAY_MS - elapsed;
-          const hours = Math.ceil(remaining / (60 * 60 * 1000));
-          return {
-            allowed: false,
-            reason: `You've used all ${LIMITS.savagePerDay} Savage roast${LIMITS.savagePerDay !== 1 ? 's' : ''} today. Resets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
-          };
-        }
-        return { allowed: true };
-      }
-    }
-    return { allowed: true };
-  }
-
-  // mild / medium — shared daily pool
-  const [start, count] = await AsyncStorage.multiGet([
-    KEYS.dailyStart,
-    KEYS.dailyCount,
-  ]);
+  const [start, count] = await AsyncStorage.multiGet([startKey, countKey]);
   const startVal = start[1];
   const countVal = parseInt(count[1] ?? '0', 10);
 
   if (startVal) {
     const elapsed = Date.now() - new Date(startVal).getTime();
     if (elapsed < DAY_MS) {
-      if (countVal >= LIMITS.dailyMildMedium) {
+      if (countVal >= limit) {
         const remaining = DAY_MS - elapsed;
         const hours = Math.ceil(remaining / (60 * 60 * 1000));
         return {
           allowed: false,
-          reason: `You've used all ${LIMITS.dailyMildMedium} daily roasts. Resets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
+          reason: `Daily limit reached. Upgrade to Premium for unlimited roasts.\n\nResets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
         };
       }
       return { allowed: true };
@@ -107,39 +71,23 @@ export async function canRoast(
 }
 
 export async function recordRoast(level: RoastLevel): Promise<void> {
-  if (level === 'nuclear') return;
+  if (level === 'nuclear') return; // premium only, no counter needed
 
-  if (level === 'savage') {
-    const existing = await AsyncStorage.getItem(KEYS.savageStart);
-    const withinWindow =
-      existing && Date.now() - new Date(existing).getTime() < DAY_MS;
+  const startKey = levelKey(level, 'start');
+  const countKey = levelKey(level, 'count');
 
-    if (withinWindow) {
-      const raw = await AsyncStorage.getItem(KEYS.savageCount);
-      const current = parseInt(raw ?? '0', 10);
-      await AsyncStorage.setItem(KEYS.savageCount, String(current + 1));
-    } else {
-      await AsyncStorage.multiSet([
-        [KEYS.savageStart, new Date().toISOString()],
-        [KEYS.savageCount, '1'],
-      ]);
-    }
-    return;
-  }
-
-  // mild / medium
-  const existing = await AsyncStorage.getItem(KEYS.dailyStart);
+  const existing = await AsyncStorage.getItem(startKey);
   const withinWindow =
     existing && Date.now() - new Date(existing).getTime() < DAY_MS;
 
   if (withinWindow) {
-    const raw = await AsyncStorage.getItem(KEYS.dailyCount);
+    const raw = await AsyncStorage.getItem(countKey);
     const current = parseInt(raw ?? '0', 10);
-    await AsyncStorage.setItem(KEYS.dailyCount, String(current + 1));
+    await AsyncStorage.setItem(countKey, String(current + 1));
   } else {
     await AsyncStorage.multiSet([
-      [KEYS.dailyStart, new Date().toISOString()],
-      [KEYS.dailyCount, '1'],
+      [startKey, new Date().toISOString()],
+      [countKey, '1'],
     ]);
   }
 }
