@@ -463,16 +463,6 @@ export default function PreviewScreen() {
           )}
         </View>
 
-        {/* Selection badges — inside capture so they appear in shared screenshots */}
-        <View style={[styles.selectionBadges, { top: insets.top + 12 }]}>
-          <View style={[styles.selectionBadge, { backgroundColor: TIER_COLORS[level] }]}>
-            <Text style={styles.selectionBadgeText}>{level.toUpperCase()}</Text>
-          </View>
-          <View style={styles.selectionBadge}>
-            <Text style={styles.selectionBadgeText}>{PERSONA_LABELS[persona]}</Text>
-          </View>
-        </View>
-
         {/* Watermark — only visible during share capture */}
         {shareMode && (
           <>
@@ -615,27 +605,6 @@ const styles = StyleSheet.create({
   // Gradient overlay
   gradient: {
     ...StyleSheet.absoluteFillObject,
-  },
-
-  // Selection badges (level + persona, read-only)
-  selectionBadges: {
-    position: 'absolute',
-    right: 16,
-    flexDirection: 'row',
-    gap: 8,
-    zIndex: 10,
-  },
-  selectionBadge: {
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  selectionBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.5,
   },
 
   // ── Verdict zone ──
