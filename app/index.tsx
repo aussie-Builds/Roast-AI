@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { StyleSheet, Pressable, View, Text, ScrollView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { track } from '@/utils/analytics';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
@@ -28,6 +29,7 @@ const PERSONAS = Object.keys(PERSONA_LABELS) as Persona[];
 
 export default function HomeScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [level, setLevel] = useState<RoastLevel>('medium');
   const [persona, setPersona] = useState<Persona>('default');
 
@@ -85,8 +87,10 @@ export default function HomeScreen() {
             );
           })}
         </ScrollView>
+      </View>
 
-        {/* Action button */}
+      {/* Action button — anchored above safe area */}
+      <View style={[styles.buttonContainer, { paddingBottom: insets.bottom + 24 }]}>
         <Pressable
           style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
           onPress={() => router.push({ pathname: '/camera', params: { level, persona } })}
@@ -101,12 +105,18 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    paddingHorizontal: 24,
   },
   content: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
+    paddingBottom: 16,
+  },
+  buttonContainer: {
+    alignItems: 'center',
+    paddingTop: 8,
   },
   title: {
     color: '#ffffff',

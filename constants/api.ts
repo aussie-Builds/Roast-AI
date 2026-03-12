@@ -16,6 +16,6 @@ export const API_BASE_URL =
   envBase ||
   (getExpoHost() ? `http://${getExpoHost()}:3000` : 'https://roast-ai-0bfe.onrender.com');
 
-console.log('API BASE URL:', API_BASE_URL);
+if (__DEV__) console.log('API BASE URL:', API_BASE_URL);
 
 export const PRIVACY_POLICY_URL = 'https://midi-clematis-e6a.notion.site/3201b1d13cce802d8b4acfa0b8634282?source=copy_link';
