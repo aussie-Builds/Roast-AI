@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "roast-app",
+    "name": "RoastLab",
     "slug": "roast-app",
     "version": "1.0.1",
     "orientation": "portrait",
@@ -44,8 +44,8 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow Roast AI to save roast images to your gallery.",
-          "savePhotosPermission": "Allow Roast AI to save roast images to your gallery."
+          "photosPermission": "Allow RoastLab to save roast images to your gallery.",
+          "savePhotosPermission": "Allow RoastLab to save roast images to your gallery."
         }
       ],
       "react-native-iap",

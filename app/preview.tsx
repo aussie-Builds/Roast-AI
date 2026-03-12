@@ -472,7 +472,7 @@ export default function PreviewScreen() {
             />
             <View style={styles.watermark}>
               <View style={styles.watermarkRow}>
-                <Text style={styles.watermarkBrand}>ROAST AI</Text>
+                <Text style={styles.watermarkBrand}>ROASTLAB</Text>
                 <View style={styles.watermarkDot} />
                 <Text style={[styles.watermarkLevel, { color: TIER_COLORS[level] }]}>
                   {level.toUpperCase()}
