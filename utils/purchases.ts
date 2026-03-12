@@ -28,6 +28,7 @@ let purchaseErrorSub: ReturnType<typeof purchaseErrorListener> | null = null;
 export async function initPurchases(): Promise<void> {
   try {
     await initConnection();
+    if (__DEV__) console.log('[IAP] Billing connection ready');
 
     // Listen for successful purchases
     purchaseUpdateSub = purchaseUpdatedListener(
@@ -43,6 +44,7 @@ export async function initPurchases(): Promise<void> {
 
     // Listen for purchase errors (logged, not thrown)
     purchaseErrorSub = purchaseErrorListener((error: PurchaseError) => {
+      if (__DEV__) console.warn('[IAP] Purchase error:', error.code, error.message);
       if (error.code !== 'E_USER_CANCELLED') {
         track('purchase_error', { code: error.code, message: error.message });
       }
@@ -78,12 +80,25 @@ export async function getSubscriptionInfo(): Promise<Subscription | null> {
 
 /**
  * Start the Google Play purchase flow for the premium subscription.
- * The purchaseUpdatedListener handles the result.
+ * Fetches product details first to ensure the SKU is valid, then launches
+ * the purchase sheet. The purchaseUpdatedListener handles the result.
  */
 export async function purchasePremium(): Promise<void> {
   if (Platform.OS !== 'android') return;
   try {
     track('purchase_started');
+
+    const product = await getSubscriptionInfo();
+    if (__DEV__) console.log('[IAP] Product fetch result:', product?.productId ?? 'not found');
+
+    if (!product) {
+      const msg = `Subscription "${SUBSCRIPTION_ID}" not available on Google Play`;
+      console.error('[IAP]', msg);
+      track('purchase_product_unavailable', { sku: SUBSCRIPTION_ID });
+      throw new Error(msg);
+    }
+
+    if (__DEV__) console.log('[IAP] Requesting subscription:', SUBSCRIPTION_ID);
     await requestSubscription({ sku: SUBSCRIPTION_ID });
   } catch (err: any) {
     // E_USER_CANCELLED is normal — user backed out of the Google Play sheet
