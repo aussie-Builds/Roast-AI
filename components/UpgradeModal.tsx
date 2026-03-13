@@ -23,18 +23,24 @@ export default function UpgradeModal({
   onClose,
 }: UpgradeModalProps) {
   const [loading, setLoading] = useState(false);
+  const [debugMsg, setDebugMsg] = useState('billing v14 ready');
 
   const handleUpgrade = async () => {
     setLoading(true);
+    setDebugMsg('handleUpgrade called...');
     track('upgrade_pressed');
     try {
+      setDebugMsg('calling purchasePremium...');
+      Alert.alert('[DEBUG]', 'About to call purchasePremium()');
       await purchasePremium();
+      setDebugMsg('purchasePremium resolved');
       // purchaseUpdatedListener in purchases.ts handles setIsPremium(true)
       // Close modal after purchase flow completes (success or cancel)
       onClose();
     } catch (err: any) {
       const detail = err?.message ?? 'Unknown error';
       console.error('[UpgradeModal] Purchase error:', detail, JSON.stringify(err));
+      setDebugMsg(`ERROR: ${detail}`);
       Alert.alert('Purchase failed', detail);
     } finally {
       setLoading(false);
@@ -55,6 +61,7 @@ export default function UpgradeModal({
           </Pressable>
 
           <Text style={styles.title}>Unlock Unlimited Roasts</Text>
+          <Text style={styles.debugText}>Billing path v14</Text>
 
           {reason ? <Text style={styles.reason}>{reason}</Text> : null}
 
@@ -81,10 +88,12 @@ export default function UpgradeModal({
               <ActivityIndicator color="#000" />
             ) : (
               <Text style={styles.upgradeButtonText}>
-                Subscribe to Premium
+                Subscribe to Premium TEST
               </Text>
             )}
           </Pressable>
+
+          <Text style={styles.debugText}>{debugMsg}</Text>
 
           <Text style={styles.terms}>
             Subscription renews automatically. Cancel anytime in Google Play.
@@ -163,6 +172,13 @@ const styles = StyleSheet.create({
     color: '#000',
     fontSize: 16,
     fontWeight: '700',
+  },
+  debugText: {
+    color: '#FF0',
+    fontSize: 10,
+    textAlign: 'center',
+    marginVertical: 4,
+    fontFamily: 'monospace',
   },
   terms: {
     color: 'rgba(255,255,255,0.35)',

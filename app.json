@@ -20,7 +20,7 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.flamekeeper.roastapp",
-      "versionCode": 3
+      "versionCode": 4
     },
     "web": {
       "output": "static",
