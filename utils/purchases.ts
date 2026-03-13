@@ -2,21 +2,20 @@ import { Platform } from 'react-native';
 import {
   initConnection,
   endConnection,
-  getSubscriptions,
-  requestSubscription,
+  fetchProducts,
+  requestPurchase,
   getAvailablePurchases,
   finishTransaction,
   purchaseUpdatedListener,
   purchaseErrorListener,
-  type SubscriptionPurchase,
+  type Purchase,
   type PurchaseError,
-  type Subscription,
+  type ProductSubscription,
 } from 'react-native-iap';
 import { setIsPremium } from './rateLimiter';
 import { track } from './analytics';
 
 const SUBSCRIPTION_ID = 'roast_ai_premium';
-const skus = [SUBSCRIPTION_ID];
 
 let purchaseUpdateSub: ReturnType<typeof purchaseUpdatedListener> | null = null;
 let purchaseErrorSub: ReturnType<typeof purchaseErrorListener> | null = null;
@@ -27,12 +26,13 @@ let purchaseErrorSub: ReturnType<typeof purchaseErrorListener> | null = null;
  */
 export async function initPurchases(): Promise<void> {
   try {
-    await initConnection();
-    if (__DEV__) console.log('[IAP] Billing connection ready');
+    const result = await initConnection();
+    console.log('[IAP] Billing connection ready, result:', result);
 
     // Listen for successful purchases
     purchaseUpdateSub = purchaseUpdatedListener(
-      async (purchase: SubscriptionPurchase) => {
+      async (purchase: Purchase) => {
+        console.log('[IAP] Purchase update received:', purchase.productId, 'state:', (purchase as any).purchaseStateAndroid);
         if (purchase.productId === SUBSCRIPTION_ID) {
           // Acknowledge the purchase so Google doesn't refund it
           await finishTransaction({ purchase, isConsumable: false });
@@ -44,13 +44,13 @@ export async function initPurchases(): Promise<void> {
 
     // Listen for purchase errors (logged, not thrown)
     purchaseErrorSub = purchaseErrorListener((error: PurchaseError) => {
-      if (__DEV__) console.warn('[IAP] Purchase error:', error.code, error.message);
-      if (error.code !== 'E_USER_CANCELLED') {
+      console.warn('[IAP] Purchase error listener:', error.code, error.message, JSON.stringify(error));
+      if (error.code !== 'user-cancelled') {
         track('purchase_error', { code: error.code, message: error.message });
       }
     });
   } catch (err) {
-    console.warn('IAP init failed:', err);
+    console.warn('[IAP] init failed:', err);
   }
 }
 
@@ -69,18 +69,33 @@ export async function teardownPurchases(): Promise<void> {
  * Fetch the subscription product details from Google Play.
  * Returns null if unavailable.
  */
-export async function getSubscriptionInfo(): Promise<Subscription | null> {
+export async function getSubscriptionInfo(): Promise<ProductSubscription | null> {
   try {
-    const subs = await getSubscriptions({ skus });
-    return subs.find((s) => s.productId === SUBSCRIPTION_ID) ?? null;
-  } catch {
+    console.log('[IAP] Fetching subscription products for SKU:', SUBSCRIPTION_ID);
+    const products = await fetchProducts({ skus: [SUBSCRIPTION_ID], type: 'subs' });
+    const productList = products ?? [];
+    console.log('[IAP] fetchProducts returned', productList.length, 'items:', JSON.stringify(productList.map(p => ({ id: p.id, type: p.type, platform: p.platform }))));
+
+    const sub = productList.find((s) => s.id === SUBSCRIPTION_ID) as ProductSubscription | undefined;
+    if (sub) {
+      // Log offer details for debugging
+      if (sub.platform === 'android') {
+        const offers = sub.subscriptionOffers ?? sub.subscriptionOfferDetailsAndroid;
+        console.log('[IAP] Subscription offers:', JSON.stringify(offers));
+      }
+    } else {
+      console.warn('[IAP] Subscription not found in fetched products');
+    }
+    return sub ?? null;
+  } catch (err) {
+    console.error('[IAP] fetchProducts failed:', err);
     return null;
   }
 }
 
 /**
  * Start the Google Play purchase flow for the premium subscription.
- * Fetches product details first to ensure the SKU is valid, then launches
+ * Fetches product details first to get the required offer token, then launches
  * the purchase sheet. The purchaseUpdatedListener handles the result.
  */
 export async function purchasePremium(): Promise<void> {
@@ -89,7 +104,7 @@ export async function purchasePremium(): Promise<void> {
     track('purchase_started');
 
     const product = await getSubscriptionInfo();
-    if (__DEV__) console.log('[IAP] Product fetch result:', product?.productId ?? 'not found');
+    console.log('[IAP] Product fetch result:', product?.id ?? 'not found');
 
     if (!product) {
       const msg = `Subscription "${SUBSCRIPTION_ID}" not available on Google Play`;
@@ -98,12 +113,52 @@ export async function purchasePremium(): Promise<void> {
       throw new Error(msg);
     }
 
-    if (__DEV__) console.log('[IAP] Requesting subscription:', SUBSCRIPTION_ID);
-    await requestSubscription({ sku: SUBSCRIPTION_ID });
+    // Extract offer token — required for Google Play Billing v5+
+    let offerToken: string | undefined;
+    if (product.platform === 'android') {
+      const offers = product.subscriptionOfferDetailsAndroid ?? [];
+      if (offers.length > 0) {
+        // Use the first available offer (base plan)
+        offerToken = offers[0].offerToken;
+        console.log('[IAP] Using offer token from offer index 0, basePlanId:', offers[0].basePlanId, 'offerId:', offers[0].offerId);
+      } else {
+        // Fallback: try standardized subscriptionOffers
+        const stdOffers = product.subscriptionOffers ?? [];
+        if (stdOffers.length > 0 && 'offerTokenAndroid' in stdOffers[0]) {
+          offerToken = (stdOffers[0] as any).offerTokenAndroid;
+          console.log('[IAP] Using offer token from standardized offers');
+        }
+      }
+    }
+
+    if (!offerToken) {
+      const msg = 'No subscription offer token available — cannot launch purchase';
+      console.error('[IAP]', msg);
+      track('purchase_no_offer_token', { sku: SUBSCRIPTION_ID });
+      throw new Error(msg);
+    }
+
+    console.log('[IAP] Requesting purchase for:', SUBSCRIPTION_ID, 'with offerToken:', offerToken.substring(0, 30) + '...');
+
+    await requestPurchase({
+      request: {
+        google: {
+          skus: [SUBSCRIPTION_ID],
+          subscriptionOffers: [
+            {
+              sku: SUBSCRIPTION_ID,
+              offerToken,
+            },
+          ],
+        },
+      },
+      type: 'subs',
+    });
   } catch (err: any) {
+    console.error('[IAP] purchasePremium error:', err?.code, err?.message, JSON.stringify(err));
     // E_USER_CANCELLED is normal — user backed out of the Google Play sheet
-    if (err?.code !== 'E_USER_CANCELLED') {
-      track('purchase_request_error', { message: err?.message });
+    if (err?.code !== 'user-cancelled') {
+      track('purchase_request_error', { code: err?.code, message: err?.message });
       throw err;
     }
   }

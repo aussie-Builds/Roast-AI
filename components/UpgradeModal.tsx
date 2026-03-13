@@ -32,8 +32,10 @@ export default function UpgradeModal({
       // purchaseUpdatedListener in purchases.ts handles setIsPremium(true)
       // Close modal after purchase flow completes (success or cancel)
       onClose();
-    } catch {
-      Alert.alert('Purchase failed', 'Something went wrong. Please try again.');
+    } catch (err: any) {
+      const detail = err?.message ?? 'Unknown error';
+      console.error('[UpgradeModal] Purchase error:', detail, JSON.stringify(err));
+      Alert.alert('Purchase failed', detail);
     } finally {
       setLoading(false);
     }
