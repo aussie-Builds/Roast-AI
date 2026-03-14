@@ -12,6 +12,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
+app.set('trust proxy', 1); // Render runs behind a reverse proxy; required for correct req.ip
 const port = process.env.PORT || 3000;
 
 const openai = new OpenAI({
@@ -38,19 +39,120 @@ function jsonError(res, status, error, message) {
   return res.status(status).type('application/json').json({ error, message });
 }
 
-// Rate limiter for roast endpoints: 10 requests per minute per IP
+// Rate limiter for roast endpoints (configurable via env)
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60_000;
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX, 10) || 6;
 const roastLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'rate_limited', message: 'Too many requests. Please try again later.' },
+  keyGenerator: (req) => {
+    // Use client-provided device ID if available, otherwise fall back to IP
+    const clientKey = req.body?.clientId || req.headers['x-device-id'];
+    return clientKey ? `client:${clientKey}` : req.ip;
+  },
+  handler: (_req, res) => {
+    console.log('[guard] rate-limit hit', { ip: _req.ip, clientId: _req.body?.clientId || _req.headers['x-device-id'] || 'none' });
+    res.status(429).json({ error: 'rate_limited', message: 'Too many requests. Please try again later.' });
+  },
 });
 app.use('/api/roast', roastLimiter);
 app.use('/api/roast-v3', roastLimiter);
 
+// --- Abuse prevention: in-flight lock, cooldown, concurrency cap, kill switches ---
+const COOLDOWN_MS = parseInt(process.env.ROAST_COOLDOWN_MS, 10) || 12_000;
+const MAX_CONCURRENT_ROASTS = parseInt(process.env.MAX_CONCURRENT_ROASTS, 10) || 5;
+const ROAST_TIMEOUT_MS = parseInt(process.env.ROAST_TIMEOUT_MS, 10) || 90_000;
+
+const inflightLocks = new Map();   // clientKey → true
+const cooldownUntil = new Map();   // clientKey → timestamp
+let activeConcurrent = 0;
+
+function getClientKey(req) {
+  return req.body?.clientId || req.headers['x-device-id'] || req.ip || 'anon';
+}
+
+// Periodic cleanup of stale cooldown entries (every 5 min)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, until] of cooldownUntil) {
+    if (until < now) cooldownUntil.delete(key);
+  }
+}, 5 * 60_000);
+
+/**
+ * Guard middleware for roast endpoints.
+ * Checks kill switches, in-flight lock, cooldown, and concurrency cap.
+ * Returns true if the request was rejected (response already sent).
+ */
+function roastGuard(req, res) {
+  const clientKey = getClientKey(req);
+  const tierName = req.body?.level || 'medium';
+
+  // Kill switches
+  if (process.env.ROASTS_ENABLED === '0' || process.env.ROASTS_ENABLED === 'false') {
+    console.log('[guard] roasts disabled globally');
+    return res.status(503).json({ error: 'service_disabled', message: 'Roasts are temporarily disabled. Please try again later.' });
+  }
+  if ((process.env.FREE_TIERS_ENABLED === '0' || process.env.FREE_TIERS_ENABLED === 'false') && tierName !== 'nuclear') {
+    console.log('[guard] free tiers disabled', { tier: tierName, clientKey });
+    return res.status(503).json({ error: 'service_disabled', message: 'Free roast tiers are temporarily disabled.' });
+  }
+  if ((process.env.NUCLEAR_ENABLED === '0' || process.env.NUCLEAR_ENABLED === 'false') && tierName === 'nuclear') {
+    console.log('[guard] nuclear disabled', { clientKey });
+    return res.status(503).json({ error: 'service_disabled', message: 'Nuclear roasts are temporarily disabled.' });
+  }
+
+  // In-flight lock
+  if (inflightLocks.has(clientKey)) {
+    console.log('[guard] in-flight lock', { clientKey });
+    return res.status(409).json({ error: 'in_flight', message: 'A roast is already being generated. Please wait for it to finish.' });
+  }
+
+  // Cooldown
+  const cooldownEnd = cooldownUntil.get(clientKey);
+  if (cooldownEnd && Date.now() < cooldownEnd) {
+    const waitSec = Math.ceil((cooldownEnd - Date.now()) / 1000);
+    console.log('[guard] cooldown', { clientKey, waitSec });
+    return res.status(429).json({ error: 'cooldown', message: `Please wait ${waitSec}s before requesting another roast.` });
+  }
+
+  // Global concurrency cap
+  if (activeConcurrent >= MAX_CONCURRENT_ROASTS) {
+    console.log('[guard] concurrency cap', { active: activeConcurrent, max: MAX_CONCURRENT_ROASTS });
+    return res.status(503).json({ error: 'server_busy', message: 'The server is busy. Please try again in a moment.' });
+  }
+
+  return null; // not rejected
+}
+
+function acquireLock(clientKey) {
+  inflightLocks.set(clientKey, true);
+  activeConcurrent++;
+}
+
+function releaseLock(clientKey) {
+  inflightLocks.delete(clientKey);
+  activeConcurrent = Math.max(0, activeConcurrent - 1);
+  cooldownUntil.set(clientKey, Date.now() + COOLDOWN_MS);
+}
+
+/**
+ * Wraps a promise with a hard timeout. Rejects with a TimeoutError if exceeded.
+ */
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('ROAST_TIMEOUT')), ms);
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', activeConcurrent, inflightClients: inflightLocks.size });
 });
 
 // --- Intensity configuration ---
@@ -6464,7 +6566,15 @@ function ensureDataUrl(imageBase64) {
 }
 
 app.post('/api/roast', async (req, res) => {
+  const clientKey = getClientKey(req);
+  const rejected = roastGuard(req, res);
+  if (rejected) return;
+
+  acquireLock(clientKey);
+  console.log('[roast] accepted', { clientKey, tier: req.body?.level || 'medium', active: activeConcurrent });
+
   try {
+    const result = await withTimeout((async () => {
     const started = Date.now();
     const { imageBase64, level = 'medium', clientId, useSavageV2, sceneHints, safeTags } = req.body;
 
@@ -7114,13 +7224,22 @@ app.post('/api/roast', async (req, res) => {
     }
 
     res.json({ roasts: filterRefusals(roasts, tierName) });
+    })(), ROAST_TIMEOUT_MS);
   } catch (error) {
-    console.error('Roast error:', error);
+    if (res.headersSent) return; // inner IIFE already sent a response before error/timeout
+    if (error.message === 'ROAST_TIMEOUT') {
+      console.log('[roast] timeout', { clientKey, ms: ROAST_TIMEOUT_MS });
+      return res.status(504).json({ error: 'timeout', message: 'Roast generation timed out. Please try again.' });
+    }
+    console.error('Roast error:', error.message || error);
     // Return 200 with fallback roast so client always gets valid JSON (never HTML error pages)
     const safeTier = req.body?.level;
     const errorFallbacks = FALLBACKS[safeTier] || FALLBACKS.medium;
     const fallback = errorFallbacks[Math.floor(Math.random() * errorFallbacks.length)];
     res.status(200).json({ roasts: [fallback] });
+  } finally {
+    releaseLock(clientKey);
+    console.log('[roast] completed', { clientKey, active: activeConcurrent });
   }
 });
 
@@ -7242,8 +7361,16 @@ function v3Validate(text, tier) {
 }
 
 app.post('/api/roast-v3', async (req, res) => {
+  const clientKey = getClientKey(req);
+  const rejected = roastGuard(req, res);
+  if (rejected) return;
+
+  acquireLock(clientKey);
+  console.log('[roast-v3] accepted', { clientKey, tier: req.body?.level || 'medium', active: activeConcurrent });
+
   const t0 = Date.now();
   try {
+    const result = await withTimeout((async () => {
     const { imageBase64, level, persona: rawPersona } = req.body || {};
     const tier = ['mild', 'medium', 'savage', 'nuclear'].includes(level) ? level : 'medium';
     const persona = V3_VALID_PERSONAS.includes(rawPersona) ? rawPersona : 'default';
@@ -7308,12 +7435,21 @@ app.post('/api/roast-v3', async (req, res) => {
     const meta = { usedFallback };
     if (usedFallback && reason) meta.rejectReason = reason;
     return res.json({ roasts: [roast], meta });
+    })(), ROAST_TIMEOUT_MS);
   } catch (err) {
+    if (res.headersSent) return; // inner IIFE already sent a response before error/timeout
+    if (err.message === 'ROAST_TIMEOUT') {
+      console.log('[roast-v3] timeout', { clientKey, ms: ROAST_TIMEOUT_MS });
+      return res.status(504).json({ error: 'timeout', message: 'Roast generation timed out. Please try again.' });
+    }
     const totalTime = Date.now() - t0;
     console.error(`[roast-v3] error after ${totalTime}ms:`, err.message || err);
     const tier = req.body?.level || 'medium';
     const fb = V3_FALLBACKS[tier] || V3_FALLBACKS.medium;
     return res.status(200).json({ roasts: [fb[Math.floor(Math.random() * fb.length)]] });
+  } finally {
+    releaseLock(clientKey);
+    console.log('[roast-v3] completed', { clientKey, active: activeConcurrent });
   }
 });
 
@@ -7432,6 +7568,8 @@ if (!process.env.TUNING_MODE) {
   app.listen(port, '0.0.0.0', () => {
     console.log(`Roast server running at http://0.0.0.0:${port}`);
     console.log('[config] NUCLEAR_ENGINE=', process.env.NUCLEAR_ENGINE || '(default:v2)');
+    console.log('[config] guards:', { cooldownMs: COOLDOWN_MS, maxConcurrent: MAX_CONCURRENT_ROASTS, timeoutMs: ROAST_TIMEOUT_MS, rateLimitMax: RATE_LIMIT_MAX, rateLimitWindowMs: RATE_LIMIT_WINDOW_MS });
+    console.log('[config] switches:', { ROASTS_ENABLED: process.env.ROASTS_ENABLED ?? '(default:on)', FREE_TIERS_ENABLED: process.env.FREE_TIERS_ENABLED ?? '(default:on)', NUCLEAR_ENABLED: process.env.NUCLEAR_ENABLED ?? '(default:on)' });
   });
 }
 
