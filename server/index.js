@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
 import sharp from 'sharp';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +39,11 @@ function jsonError(res, status, error, message) {
   return res.status(status).type('application/json').json({ error, message });
 }
 
+// Shared client key: clientId → x-device-id → IPv6-safe IP fallback
+function getClientKey(req) {
+  return req.body?.clientId || req.headers['x-device-id'] || ipKeyGenerator(req) || 'anon';
+}
+
 // Rate limiter for roast endpoints (configurable via env)
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60_000;
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX, 10) || 6;
@@ -47,13 +52,9 @@ const roastLimiter = rateLimit({
   max: RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    // Use client-provided device ID if available, otherwise fall back to IP
-    const clientKey = req.body?.clientId || req.headers['x-device-id'];
-    return clientKey ? `client:${clientKey}` : req.ip;
-  },
+  keyGenerator: (req) => getClientKey(req),
   handler: (_req, res) => {
-    console.log('[guard] rate-limit hit', { ip: _req.ip, clientId: _req.body?.clientId || _req.headers['x-device-id'] || 'none' });
+    console.log('[guard] rate-limit hit', { key: getClientKey(_req) });
     res.status(429).json({ error: 'rate_limited', message: 'Too many requests. Please try again later.' });
   },
 });
@@ -68,10 +69,6 @@ const ROAST_TIMEOUT_MS = parseInt(process.env.ROAST_TIMEOUT_MS, 10) || 90_000;
 const inflightLocks = new Map();   // clientKey → true
 const cooldownUntil = new Map();   // clientKey → timestamp
 let activeConcurrent = 0;
-
-function getClientKey(req) {
-  return req.body?.clientId || req.headers['x-device-id'] || req.ip || 'anon';
-}
 
 // Periodic cleanup of stale cooldown entries (every 5 min)
 setInterval(() => {
