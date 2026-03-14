@@ -41,7 +41,7 @@ function jsonError(res, status, error, message) {
 
 // Shared client key: clientId → x-device-id → IPv6-safe IP fallback
 function getClientKey(req) {
-  return req.body?.clientId || req.headers['x-device-id'] || ipKeyGenerator(req) || 'anon';
+  return req.body?.clientId || req.headers['x-device-id'] || (req.ip && ipKeyGenerator(req.ip)) || 'anon';
 }
 
 // Rate limiter for roast endpoints (configurable via env)
