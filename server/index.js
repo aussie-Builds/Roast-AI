@@ -7322,6 +7322,24 @@ const V3_PERSONA_FALLBACKS = {
     'Somewhere a treadmill is running faster than your effort.',
     'Your vibe is pre-workout with no actual workout.',
   ],
+  gym_bro_savage: [
+    'You built like a rest day that never ended.',
+    'Even your gym selfie needs a spotter.',
+    'Your form is so bad the squat rack filed a restraining order.',
+    'You look like you curl in the squat rack and feel no shame.',
+    'Bro, your physique is a cautionary tale for skipping everything.',
+    'You carry yourself like a gym membership collecting dust since January.',
+  ],
+  gym_bro_nuclear: [
+    'Bro, that pose looks like your muscles filed for divorce.',
+    'You look like a before photo that gave up on the after.',
+    'That outfit hits like a failed bulk that went straight to the face.',
+    'Your vibe screams "I ask people to spot me on the Smith machine."',
+    'Even your haircut looks like it skipped the warm-up.',
+    'You carry yourself like someone who Googles "how to look strong" in public.',
+    'That expression is giving "just got out-lifted by the cardio bunny."',
+    'Bro, your whole look is a PR in disappointment.',
+  ],
 };
 
 const V3_FALLBACKS = {
@@ -7462,6 +7480,49 @@ app.post('/api/roast-v3', async (req, res) => {
             roast = cutMatch[1].replace(/[,;\s]+$/, '') + '.';
           }
         }
+      }
+    }
+
+    // gym_bro + savage/nuclear: same sentence-aware shortening as medium
+    if (persona === 'gym_bro' && (tier === 'savage' || tier === 'nuclear')) {
+      if (/^That\s/i.test(roast)) roast = roast.replace(/^That\s+/i, '').replace(/^./, c => c.toUpperCase());
+      else if (/^This\s/i.test(roast)) roast = roast.replace(/^This\s+/i, '').replace(/^./, c => c.toUpperCase());
+      const maxWords = V3_MAX_WORDS[tier] || 20;
+      if (roast.split(/\s+/).length > maxWords && roast.split(/\s+/).length <= maxWords + 8) {
+        const sentences = roast.match(/[^.!?]*[.!?]+/g);
+        if (sentences && sentences.length > 1) {
+          let shortened = '';
+          for (const s of sentences) {
+            const candidate = (shortened + s).trim();
+            if (candidate.split(/\s+/).length <= maxWords) shortened = candidate;
+            else break;
+          }
+          if (shortened && shortened.split(/\s+/).length >= 5) roast = shortened.trim();
+        }
+        if (roast.split(/\s+/).length > maxWords) {
+          const cutMatch = roast.match(/^(.{20,}?)[,;\u2014—]\s/);
+          if (cutMatch && cutMatch[1].split(/\s+/).length <= maxWords && cutMatch[1].split(/\s+/).length >= 5) {
+            roast = cutMatch[1].replace(/[,;\s]+$/, '') + '.';
+          }
+        }
+      }
+    }
+
+    // gym_bro + nuclear only: reject weak/undercooked lines before general validation
+    if (persona === 'gym_bro' && tier === 'nuclear') {
+      const wc = roast.split(/\s+/).length;
+      const isWeak =
+        wc < 6 ||                                          // too short for nuclear
+        /^(nice|cool|okay|oh|huh|wow|sure)\b/i.test(roast) || // soft/vague opener
+        (roast.endsWith('?') && wc < 8) ||                 // short question with no punch
+        !/[.!]/.test(roast);                                // no terminal punctuation = fragment
+      if (isWeak) {
+        console.log(`[roast-v3] gym_bro_nuclear weak_line rejected: "${roast}"`);
+        const fb = V3_PERSONA_FALLBACKS.gym_bro_nuclear;
+        roast = fb[Math.floor(Math.random() * fb.length)];
+        const totalTime = Date.now() - t0;
+        console.log(`[roast-v3] tier=${tier} persona=${persona} totalTime=${totalTime}ms fallback=true reason=weak_line`);
+        return res.json({ roasts: [roast], meta: { usedFallback: true, rejectReason: 'weak_line' } });
       }
     }
 
