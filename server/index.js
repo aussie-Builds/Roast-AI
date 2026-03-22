@@ -14,6 +14,7 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 const app = express();
 app.set('trust proxy', 2); // Cloudflare (hop 1) → Render (hop 2) → app; need 2 to reach real client IP
 const port = process.env.PORT || 3000;
+const TUNING_MODE = process.env.TUNING_MODE === '1';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -58,8 +59,10 @@ const roastLimiter = rateLimit({
     res.status(429).json({ error: 'rate_limited', message: 'Too many requests. Please try again later.' });
   },
 });
-app.use('/api/roast', roastLimiter);
-app.use('/api/roast-v3', roastLimiter);
+if (!TUNING_MODE) {
+  app.use('/api/roast', roastLimiter);
+  app.use('/api/roast-v3', roastLimiter);
+}
 
 // --- Abuse prevention: in-flight lock, cooldown, concurrency cap, kill switches ---
 const COOLDOWN_MS = parseInt(process.env.ROAST_COOLDOWN_MS, 10) || 12_000;
@@ -101,18 +104,20 @@ function roastGuard(req, res) {
     return res.status(503).json({ error: 'service_disabled', message: 'Nuclear roasts are temporarily disabled.' });
   }
 
-  // In-flight lock
-  if (inflightLocks.has(clientKey)) {
+  // In-flight lock (bypassed in tuning mode)
+  if (!TUNING_MODE && inflightLocks.has(clientKey)) {
     console.log('[guard] in-flight lock', { clientKey });
     return res.status(409).json({ error: 'in_flight', message: 'A roast is already being generated. Please wait for it to finish.' });
   }
 
-  // Cooldown
-  const cooldownEnd = cooldownUntil.get(clientKey);
-  if (cooldownEnd && Date.now() < cooldownEnd) {
-    const waitSec = Math.ceil((cooldownEnd - Date.now()) / 1000);
-    console.log('[guard] cooldown', { clientKey, waitSec });
-    return res.status(429).json({ error: 'cooldown', message: `Please wait ${waitSec}s before requesting another roast.` });
+  // Cooldown (bypassed in tuning mode)
+  if (!TUNING_MODE) {
+    const cooldownEnd = cooldownUntil.get(clientKey);
+    if (cooldownEnd && Date.now() < cooldownEnd) {
+      const waitSec = Math.ceil((cooldownEnd - Date.now()) / 1000);
+      console.log('[guard] cooldown', { clientKey, waitSec });
+      return res.status(429).json({ error: 'cooldown', message: `Please wait ${waitSec}s before requesting another roast.` });
+    }
   }
 
   // Global concurrency cap
@@ -132,7 +137,7 @@ function acquireLock(clientKey) {
 function releaseLock(clientKey) {
   inflightLocks.delete(clientKey);
   activeConcurrent = Math.max(0, activeConcurrent - 1);
-  cooldownUntil.set(clientKey, Date.now() + COOLDOWN_MS);
+  if (!TUNING_MODE) cooldownUntil.set(clientKey, Date.now() + COOLDOWN_MS);
 }
 
 /**
@@ -5020,30 +5025,28 @@ async function generateSavageV2({ clientId = 'anon', imageBase64 }) {
   // 3. Polish best candidate (fallback to 2nd-best if validation fails)
   async function polishAndValidate(candidate) {
     let polished = candidate.skeleton;
-    if (!process.env.TUNING_MODE) {
-      const polishPrompt = `Rewrite this EXACT roast to sound more natural and punchy. Do NOT add new ideas, do NOT change the target, do NOT add new sentences. Keep 1–2 sentences. 12–26 words preferred. Do NOT use questions. Output ONLY the rewritten roast, nothing else.\n\nRoast: "${candidate.skeleton}"`;
-      try {
-        const polishOpts = {
-          model: 'gpt-4o',
-          input: [
-            { role: 'system', content: 'You are a roast rewriter. You ONLY output the rewritten roast. No quotes, no explanation, no markdown. 1–2 sentences only. Savage but not cruel. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
-            {
-              role: 'user',
-              content: [
-                { type: 'input_text', text: polishPrompt },
-                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-              ],
-            },
-          ],
-          max_output_tokens: 100,
-          temperature: 0.85,
-          top_p: 0.9,
-        };
-        const polishResp = await openai.responses.create(polishOpts);
-        if (polishResp.output_text) polished = polishResp.output_text;
-      } catch (err) {
-        if (isDev) console.log(`[savage-v2] polish LLM error: ${err.message}`);
-      }
+    const polishPrompt = `Rewrite this EXACT roast to sound more natural and punchy. Do NOT add new ideas, do NOT change the target, do NOT add new sentences. Keep 1–2 sentences. 12–26 words preferred. Do NOT use questions. Output ONLY the rewritten roast, nothing else.\n\nRoast: "${candidate.skeleton}"`;
+    try {
+      const polishOpts = {
+        model: 'gpt-4o',
+        input: [
+          { role: 'system', content: 'You are a roast rewriter. You ONLY output the rewritten roast. No quotes, no explanation, no markdown. 1–2 sentences only. Savage but not cruel. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: polishPrompt },
+              { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+            ],
+          },
+        ],
+        max_output_tokens: 100,
+        temperature: 0.85,
+        top_p: 0.9,
+      };
+      const polishResp = await openai.responses.create(polishOpts);
+      if (polishResp.output_text) polished = polishResp.output_text;
+    } catch (err) {
+      if (isDev) console.log(`[savage-v2] polish LLM error: ${err.message}`);
     }
 
     let result = sv2CleanOutput(polished);
@@ -5756,29 +5759,27 @@ async function generateNuclearSv({ clientId = 'anon', imageBase64, dynamicTarget
   // 3. Polish via single LLM call — try best, then 2nd-best
   async function nsvPolishAndValidate(candidate) {
     let polished = candidate.skeleton;
-    if (!process.env.TUNING_MODE) {
-      const polishPrompt = `Polish this two-sentence escalation roast so it sounds natural and sharp.\n\nRules:\n- Exactly 2 sentences\n- 14–22 words total preferred\n- Sentence 1: setup/observation about the subject (~9-12 words)\n- Sentence 2: escalation/punchline that hits harder (~5-9 words)\n- Keep the same meaning, both targets, and structure\n\nRoast:\n"${candidate.skeleton}"`;
-      try {
-        const polishResp = await openai.responses.create({
-          model: 'gpt-4o',
-          input: [
-            { role: 'system', content: 'You are a ruthless roast polisher. Output ONLY the polished roast. No quotes, no explanation, no markdown. Exactly 2 sentences. Sentence 1 is the setup. Sentence 2 escalates and hits harder. 14–22 words total. Cold, sharp, nuclear.' },
-            {
-              role: 'user',
-              content: [
-                { type: 'input_text', text: polishPrompt },
-                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-              ],
-            },
-          ],
-          max_output_tokens: 80,
-          temperature: 0.85,
-          top_p: 0.9,
-        });
-        if (polishResp.output_text) polished = polishResp.output_text;
-      } catch (err) {
-        if (isDev) console.log(`[nuclear-sv] polish LLM error: ${err.message}`);
-      }
+    const polishPrompt = `Polish this two-sentence escalation roast so it sounds natural and sharp.\n\nRules:\n- Exactly 2 sentences\n- 14–22 words total preferred\n- Sentence 1: setup/observation about the subject (~9-12 words)\n- Sentence 2: escalation/punchline that hits harder (~5-9 words)\n- Keep the same meaning, both targets, and structure\n\nRoast:\n"${candidate.skeleton}"`;
+    try {
+      const polishResp = await openai.responses.create({
+        model: 'gpt-4o',
+        input: [
+          { role: 'system', content: 'You are a ruthless roast polisher. Output ONLY the polished roast. No quotes, no explanation, no markdown. Exactly 2 sentences. Sentence 1 is the setup. Sentence 2 escalates and hits harder. 14–22 words total. Cold, sharp, nuclear.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: polishPrompt },
+              { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+            ],
+          },
+        ],
+        max_output_tokens: 80,
+        temperature: 0.85,
+        top_p: 0.9,
+      });
+      if (polishResp.output_text) polished = polishResp.output_text;
+    } catch (err) {
+      if (isDev) console.log(`[nuclear-sv] polish LLM error: ${err.message}`);
     }
 
     // Clean + validate using nuclear cleaning pipeline
@@ -6144,32 +6145,30 @@ async function generateMediumV2({ imageBase64, clientId = 'anon' }) {
 
   const _tPrep = Date.now();
 
-  // 3. Polish best candidate via single LLM call (production only)
+  // 3. Polish best candidate via single LLM call
   async function mv2PolishAndValidate(candidate) {
     let polished = candidate.skeleton;
-    if (!process.env.TUNING_MODE) {
-      const polishPrompt = `Rewrite this roast to sound natural and conversational. Keep it friendly but pointed — an "oof" not an insult. Do NOT add new ideas or change the target. Keep it as 1 sentence. 10–16 words preferred. Output ONLY the rewritten roast.\n\nRoast: "${candidate.skeleton}"`;
-      try {
-        const polishResp = await openai.responses.create({
-          model: 'gpt-4o',
-          input: [
-            { role: 'system', content: 'You are a friendly roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Conversational, not cruel. 10–16 words. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
-            {
-              role: 'user',
-              content: [
-                { type: 'input_text', text: polishPrompt },
-                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-              ],
-            },
-          ],
-          max_output_tokens: 60,
-          temperature: 0.85,
-          top_p: 0.9,
-        });
-        if (polishResp.output_text) polished = polishResp.output_text;
-      } catch (err) {
-        if (isDev) console.log(`[medium-v2] polish error: ${err.message}`);
-      }
+    const polishPrompt = `Rewrite this roast to sound natural and conversational. Keep it friendly but pointed — an "oof" not an insult. Do NOT add new ideas or change the target. Keep it as 1 sentence. 10–16 words preferred. Output ONLY the rewritten roast.\n\nRoast: "${candidate.skeleton}"`;
+    try {
+      const polishResp = await openai.responses.create({
+        model: 'gpt-4o',
+        input: [
+          { role: 'system', content: 'You are a friendly roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Conversational, not cruel. 10–16 words. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: polishPrompt },
+              { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+            ],
+          },
+        ],
+        max_output_tokens: 60,
+        temperature: 0.85,
+        top_p: 0.9,
+      });
+      if (polishResp.output_text) polished = polishResp.output_text;
+    } catch (err) {
+      if (isDev) console.log(`[medium-v2] polish error: ${err.message}`);
     }
 
     let result = mv2CleanOutput(polished);
@@ -6430,32 +6429,30 @@ async function generateMildV2({ imageBase64, clientId = 'anon' }) {
 
   const _tPrep = Date.now();
 
-  // 3. Polish best candidate via single LLM call (production only)
+  // 3. Polish best candidate via single LLM call
   async function mlv2PolishAndValidate(candidate) {
     let polished = candidate.skeleton;
-    if (!process.env.TUNING_MODE) {
-      const polishPrompt = `Rewrite this roast to sound natural and conversational. Keep it gentle and playful — a "haha okay fair" not an insult. Do NOT add new ideas or change the target. Keep it as 1 sentence. 9–11 words preferred, max 13. Output ONLY the rewritten roast.\n\nRoast: "${candidate.skeleton}"`;
-      try {
-        const polishResp = await openai.responses.create({
-          model: 'gpt-4o',
-          input: [
-            { role: 'system', content: 'You are a gentle roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Playful and light, never harsh. 9–11 words preferred. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
-            {
-              role: 'user',
-              content: [
-                { type: 'input_text', text: polishPrompt },
-                { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
-              ],
-            },
-          ],
-          max_output_tokens: 50,
-          temperature: 0.8,
-          top_p: 0.9,
-        });
-        if (polishResp.output_text) polished = polishResp.output_text;
-      } catch (err) {
-        if (isDev) console.log(`[mild-v2] polish error: ${err.message}`);
-      }
+    const polishPrompt = `Rewrite this roast to sound natural and conversational. Keep it gentle and playful — a "haha okay fair" not an insult. Do NOT add new ideas or change the target. Keep it as 1 sentence. 9–11 words preferred, max 13. Output ONLY the rewritten roast.\n\nRoast: "${candidate.skeleton}"`;
+    try {
+      const polishResp = await openai.responses.create({
+        model: 'gpt-4o',
+        input: [
+          { role: 'system', content: 'You are a gentle roast rewriter. Output ONLY the rewritten roast. No quotes, no explanation. 1 sentence only. Playful and light, never harsh. 9–11 words preferred. NEVER mention not knowing who someone is. NEVER use assistant disclaimers. Roast only visible details.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: polishPrompt },
+              { type: 'input_image', image_url: nv2ToDataUrl(imageBase64) },
+            ],
+          },
+        ],
+        max_output_tokens: 50,
+        temperature: 0.8,
+        top_p: 0.9,
+      });
+      if (polishResp.output_text) polished = polishResp.output_text;
+    } catch (err) {
+      if (isDev) console.log(`[mild-v2] polish error: ${err.message}`);
     }
 
     let result = mlv2CleanOutput(polished);
@@ -7247,7 +7244,8 @@ const V3_PERSONAS = {
   default: '',
   butler: 'Voice: aristocratic British butler — politely condescending, dry, restrained. Vary your opener every time — draw from the tone of words like "Evidently," "Remarkable," "Curious," "How unfortunate," "One does wonder," but never repeat the same opener twice. One simple clause — no semicolons, no compound sentences. 8–14 words max.',
   mean_girl: 'Voice: dismissive mean girl reacting to a bad selfie. Open with a short dismissive reaction — rotate evenly through "Oh wow.", "Cute.", "Aw.", "Okay…", "Sure.", "Yikes." — do NOT favor "Yikes" over the others. Then one short, unimpressed observation about what you see. Condescending, blunt, socially cutting. BANNED: "Confidence level", "This photo screams", "Your smile could". Never repeat the same opener twice. 8–12 words max.',
-  gym_bro: 'Voice: gym trash talk. Cocky bro roasting a friend. Every roast must include exactly one gym term (reps, sets, spotter, PR, warmup, cardio, cutting, bulking, rest day, gains, or form). BANNED openers: "Looks like", "Confidence level", "Your expression says". Keep it short — 6–12 words. Think locker room one-liner, not stand-up bit.',
+  gym_bro: 'You ARE a gym bro — not playing one. You live in the gym, and it leaks into how you talk, think, and joke. Roast what you SEE in the photo (clothing, pose, expression, background, vibe) the way you\'d roast a buddy between sets. Your humor is confident, blunt, and a little dumb on purpose — like a guy who says "bro" unironically. Gym stuff comes up because it\'s how your brain works, not because you\'re told to include it. Sometimes you compare what you see to something at the gym. Sometimes you just sound like a meathead making an observation. Both are fine. Never sound like a polite stranger — sound like a friend who benches more than you. BANNED openers: "Looks like", "Confidence level", "Your expression says". 6–12 words. One sentence.',
+  gym_bro_mild: 'You ARE a gym bro — same guy as always, just being chill about it. You see the world through a fitness lens but right now you\'re relaxed, not competing. Roast what you SEE in the photo (clothing, pose, expression, background, vibe) the way you\'d rib a gym buddy over a shake — warm, playful, zero edge. Gym thinking colors your humor naturally: you might compare a pose to bad form, a shirt to gear that doesn\'t match, or a vibe to someone who just finished their first-ever set. Keep it light and fond — you like this person. Never sound generic or polite — still sound like a bro, just a friendly one. BANNED openers: "Looks like", "Confidence level", "Your expression says". 6–10 words. One sentence.',
   anime_villain: 'Voice: theatrical anime villain addressing a weak opponent. Open with a dramatic word — rotate through "Pathetic.", "Fool.", "Pitiful.", "How disappointing.", "Laughable.", "Amusing." — then one short, arrogant observation about what you see. Speak as if you are vastly superior. Never repeat the same opener twice. 8–14 words max.',
   therapist: 'Voice: therapist making a calm observation. Start with "Interesting." or "Fascinating." or "I notice..." then one short clinical observation about what you see. Deadpan, analytical, no jokes. 8–12 words after the opener.',
 };
@@ -7269,9 +7267,9 @@ const V3_TONES = {
   medium:  [
     'Tone: sarcastic and embarrassing — sharper than friendly teasing, clearly a roast. Playful but cutting.',
     'No mild-style compliments, no gentle teasing. This should sting a little. Still app-safe. Target 8–14 words, hard max 18. No trailing clauses unless they improve the punchline.',
-    'NEVER start with "That" — it is banned as a sentence opener. Also banned: "With that...", "Is that...".',
+    'BANNED first words: "That", "This", "Looks like", "Confidence level", "Confidence of", "With that", "Is that". NEVER open a roast with any of these.',
     'BANNED templates: "Your X looks like...", "Your X screams...", "Your X says...". Never use these structures.',
-    'Vary openers — try: "Even...", "Looks like...", "This photo...", "Somehow...", "Nobody asked for...", "Apparently...", "Confidence...", or any fresh start.',
+    'Every roast must open differently. Do NOT fall back on a small set of favorite openers — invent a fresh start each time based on the specific detail you are roasting.',
     'No long setups or explanations. Write like a meme caption — direct punchline, no filler.',
     'Pick the MOST noticeable detail to roast — clothing, pose, camera angle, expression, background, pets, environment, or overall vibe. Do NOT default to hair.',
     'Angles to try: sarcastic observations, backhanded compliments, deadpan dismissals, embarrassing comparisons, ironic narration, casual brutality.',
@@ -7293,10 +7291,11 @@ const V3_TONES = {
   nuclear: [
     'Tone: ruthless, humiliating, and unforgiving — the harshest tier, significantly more brutal than savage. Maximum cruelty.',
     'No compliments, no soft language, no savage-style cleverness. Pure destruction. Still funny and shareable. Target 8–14 words, hard max 18. No trailing clauses unless they improve the punchline.',
+    'IMPORTANT: Roast what is VISIBLE — clothing, pose, expression, background, vibe, context. Do NOT attack the person\'s entire existence, life, worth, or future. The joke must be about the photo, not an existential takedown. Brutal about what you see, not about who they are as a human.',
     'Play Store safe — no slurs, no threats, no harassment, no sexual content. Destroy them within the rules.',
     'NEVER start with "That" or "Looks like" — both are banned as sentence openers. Also banned: "With that...", "Is that...".',
     'BANNED templates: "Your X looks like...", "Your X screams...", "Your X says...". Never use these structures.',
-    'Vary openers — try: "Even...", "Somehow...", "Nobody warned you...", "This photo...", "Apparently...", "Someone should have...", "Your barber...", "The audacity...", or any fresh start.',
+    'Every roast must open differently. Do NOT fall back on a small set of favorite openers — invent a fresh start each time based on the specific detail you are roasting.',
     'No setups, no explanations. Go straight for the kill — one brutal observation about what you see.',
     'Roast the MOST noticeable visible detail — clothing, pose, camera angle, expression, background, pets, environment, or overall vibe. Do NOT default to hair.',
     'Prefer maximum-impact insults over wordplay. Be ruthless, not clever.',
@@ -7304,6 +7303,25 @@ const V3_TONES = {
     'Never repeat the same joke structure. Each roast should feel structurally unique.',
     'End with a punchline so brutal it could end a friendship.',
   ].join(' '),
+};
+
+const V3_PERSONA_FALLBACKS = {
+  gym_bro_mild: [
+    'That pose has the same energy as a foam roller gathering dust.',
+    'You look like you signed up for a gym tour and never came back.',
+    'Even your protein shake would ghost you.',
+    'You carry yourself like a treadmill set to 2.0.',
+    'Somewhere a squat rack is relieved you stayed home.',
+    'Your vibe is "free trial membership expired."',
+  ],
+  gym_bro_medium: [
+    'Bro, even the bench press would leave you on read.',
+    'You look like you flex in the mirror and the mirror flexes back harder.',
+    'Your whole aesthetic screams "I watch gym TikToks but never go."',
+    'You carry yourself like a protein bar that fell behind the couch.',
+    'Somewhere a treadmill is running faster than your effort.',
+    'Your vibe is pre-workout with no actual workout.',
+  ],
 };
 
 const V3_FALLBACKS = {
@@ -7392,8 +7410,8 @@ app.post('/api/roast-v3', async (req, res) => {
 
     console.log(`[roast-v3] image originalKB=${(originalBytes / 1024).toFixed(0)} compressedKB=${(compressedBytes / 1024).toFixed(0)} reduction=${(((originalBytes - compressedBytes) / originalBytes) * 100).toFixed(0)}% resizeMs=${resizeMs}`);
 
-    const personaBlock = V3_PERSONAS[persona] || '';
-    const systemPrompt = 'Roast comedian. One-liner selfie roasts. ' + V3_TONES[tier] + (personaBlock ? ' ' + personaBlock : '') + ' ONE sentence, no preamble, no quotes. NEVER say you can\'t identify someone. NEVER apologise or say sorry. No hedging, no disclaimers.';
+    const personaBlock = V3_PERSONAS[`${persona}_${tier}`] || V3_PERSONAS[persona] || '';
+    const systemPrompt = (personaBlock ? personaBlock + ' ' : '') + 'Roast comedian. One-liner selfie roasts. ' + V3_TONES[tier] + ' ONE sentence, no preamble, no quotes. NEVER say you can\'t identify someone. NEVER apologise or say sorry. No hedging, no disclaimers.';
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -7418,10 +7436,39 @@ app.post('/api/roast-v3', async (req, res) => {
       roast = roast.slice(1, -1).trim();
     }
 
+    // gym_bro + medium only: fix common opener collapse and shorten overflows cleanly
+    if (persona === 'gym_bro' && tier === 'medium') {
+      // Rewrite banned openers instead of rejecting
+      if (/^That\s/i.test(roast)) roast = roast.replace(/^That\s+/i, '').replace(/^./, c => c.toUpperCase());
+      else if (/^This\s/i.test(roast)) roast = roast.replace(/^This\s+/i, '').replace(/^./, c => c.toUpperCase());
+      // Shorten slightly over-limit roasts by dropping trailing clauses
+      const maxWords = V3_MAX_WORDS[tier] || 20;
+      if (roast.split(/\s+/).length > maxWords && roast.split(/\s+/).length <= maxWords + 8) {
+        // Try keeping the last complete sentence that fits
+        const sentences = roast.match(/[^.!?]*[.!?]+/g);
+        if (sentences && sentences.length > 1) {
+          let shortened = '';
+          for (const s of sentences) {
+            const candidate = (shortened + s).trim();
+            if (candidate.split(/\s+/).length <= maxWords) shortened = candidate;
+            else break;
+          }
+          if (shortened && shortened.split(/\s+/).length >= 5) roast = shortened.trim();
+        }
+        // If still over after sentence trim, try cutting at last comma/semicolon/dash within limit
+        if (roast.split(/\s+/).length > maxWords) {
+          const cutMatch = roast.match(/^(.{20,}?)[,;\u2014—]\s/);
+          if (cutMatch && cutMatch[1].split(/\s+/).length <= maxWords && cutMatch[1].split(/\s+/).length >= 5) {
+            roast = cutMatch[1].replace(/[,;\s]+$/, '') + '.';
+          }
+        }
+      }
+    }
+
     const { ok, reason } = v3Validate(roast, tier);
     let usedFallback = false;
     if (!ok) {
-      const fb = V3_FALLBACKS[tier];
+      const fb = V3_PERSONA_FALLBACKS[`${persona}_${tier}`] || V3_FALLBACKS[tier];
       roast = fb[Math.floor(Math.random() * fb.length)];
       usedFallback = true;
     }
@@ -7561,13 +7608,12 @@ app.use((err, req, res, _next) => {
   res.status(err.status || 500).json({ error: 'server_error', message: err.message });
 });
 
-if (!process.env.TUNING_MODE) {
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Roast server running at http://0.0.0.0:${port}`);
-    console.log('[config] NUCLEAR_ENGINE=', process.env.NUCLEAR_ENGINE || '(default:v2)');
-    console.log('[config] guards:', { cooldownMs: COOLDOWN_MS, maxConcurrent: MAX_CONCURRENT_ROASTS, timeoutMs: ROAST_TIMEOUT_MS, rateLimitMax: RATE_LIMIT_MAX, rateLimitWindowMs: RATE_LIMIT_WINDOW_MS });
-    console.log('[config] switches:', { ROASTS_ENABLED: process.env.ROASTS_ENABLED ?? '(default:on)', FREE_TIERS_ENABLED: process.env.FREE_TIERS_ENABLED ?? '(default:on)', NUCLEAR_ENABLED: process.env.NUCLEAR_ENABLED ?? '(default:on)' });
-  });
-}
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Roast server running at http://0.0.0.0:${port}`);
+  console.log('[config] TUNING_MODE:', TUNING_MODE ? 'ON — cooldown, rate-limit, in-flight lock BYPASSED' : 'off');
+  console.log('[config] NUCLEAR_ENGINE=', process.env.NUCLEAR_ENGINE || '(default:v2)');
+  console.log('[config] guards:', { cooldownMs: COOLDOWN_MS, maxConcurrent: MAX_CONCURRENT_ROASTS, timeoutMs: ROAST_TIMEOUT_MS, rateLimitMax: RATE_LIMIT_MAX, rateLimitWindowMs: RATE_LIMIT_WINDOW_MS });
+  console.log('[config] switches:', { ROASTS_ENABLED: process.env.ROASTS_ENABLED ?? '(default:on)', FREE_TIERS_ENABLED: process.env.FREE_TIERS_ENABLED ?? '(default:on)', NUCLEAR_ENABLED: process.env.NUCLEAR_ENABLED ?? '(default:on)' });
+});
 
 export { generateNuclearV2, generateSavageV2, generateNuclearSv, generateMediumV2, generateMildV2, nv2ExtractSceneNouns, extractSafeSelfieTags };
