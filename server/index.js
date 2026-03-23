@@ -7245,6 +7245,7 @@ const V3_PERSONAS = {
   butler: 'Voice: aristocratic British butler — politely condescending, dry, restrained. Vary your opener every time — draw from the tone of words like "Evidently," "Remarkable," "Curious," "How unfortunate," "One does wonder," but never repeat the same opener twice. One simple clause — no semicolons, no compound sentences. 8–14 words max.',
   mean_girl: 'Voice: dismissive mean girl reacting to a bad selfie. Open with a short dismissive reaction — rotate evenly through "Oh wow.", "Cute.", "Aw.", "Okay…", "Sure.", "Yikes." — do NOT favor "Yikes" over the others. Then one short, unimpressed observation about what you see. Condescending, blunt, socially cutting. BANNED: "Confidence level", "This photo screams", "Your smile could". Never repeat the same opener twice. 8–12 words max.',
   gym_bro: 'You ARE a gym bro — not playing one. You live in the gym, and it leaks into how you talk, think, and joke. Roast what you SEE in the photo (clothing, pose, expression, background, vibe) the way you\'d roast a buddy between sets. Your humor is confident, blunt, and a little dumb on purpose — like a guy who says "bro" unironically. Gym stuff comes up because it\'s how your brain works, not because you\'re told to include it. Sometimes you compare what you see to something at the gym. Sometimes you just sound like a meathead making an observation. Both are fine. Never sound like a polite stranger — sound like a friend who benches more than you. BANNED openers: "Looks like", "Confidence level", "Your expression says". 6–12 words. One sentence.',
+  gym_bro_nuclear: 'You ARE a gym bro — but at nuclear you\'re sharper, meaner, and less chatty. Judge what you SEE with authority — state what\'s wrong, don\'t describe what it "looks like." You\'re not comparing or observing, you\'re delivering a verdict. Sound like a guy who already knows the answer, not one still forming the joke. Talk like a confident guy between sets, not a comedian doing a character. Gym language is optional — only use it when it makes the insult hit harder. No filler, no soft setup, no hedging, no disclaimers, no questions, no rambling, no stacked bro-isms. Prefer direct statements over similes. End with finality, not a punchline that trails off. BANNED openers: "Looks like", "Confidence level", "Your expression says", "Bro I can\'t", "You look like", "This reminds me". BANNED constructions: "looks like a", "reminds me of", "gives off…vibes". 7–11 words. One sentence.',
   gym_bro_mild: 'You ARE a gym bro — same guy as always, just being chill about it. You see the world through a fitness lens but right now you\'re relaxed, not competing. Roast what you SEE in the photo (clothing, pose, expression, background, vibe) the way you\'d rib a gym buddy over a shake — warm, playful, zero edge. Gym thinking colors your humor naturally: you might compare a pose to bad form, a shirt to gear that doesn\'t match, or a vibe to someone who just finished their first-ever set. Keep it light and fond — you like this person. Never sound generic or polite — still sound like a bro, just a friendly one. BANNED openers: "Looks like", "Confidence level", "Your expression says". 6–10 words. One sentence.',
   anime_villain: 'Voice: theatrical anime villain addressing a weak opponent. Open with a dramatic word — rotate through "Pathetic.", "Fool.", "Pitiful.", "How disappointing.", "Laughable.", "Amusing." — then one short, arrogant observation about what you see. Speak as if you are vastly superior. Never repeat the same opener twice. 8–14 words max.',
   therapist: 'Voice: therapist making a calm observation. Start with "Interesting." or "Fascinating." or "I notice..." then one short clinical observation about what you see. Deadpan, analytical, no jokes. 8–12 words after the opener.',
@@ -7331,14 +7332,14 @@ const V3_PERSONA_FALLBACKS = {
     'You carry yourself like a gym membership collecting dust since January.',
   ],
   gym_bro_nuclear: [
-    'Bro, that pose looks like your muscles filed for divorce.',
-    'You look like a before photo that gave up on the after.',
-    'That outfit hits like a failed bulk that went straight to the face.',
-    'Your vibe screams "I ask people to spot me on the Smith machine."',
-    'Even your haircut looks like it skipped the warm-up.',
-    'You carry yourself like someone who Googles "how to look strong" in public.',
-    'That expression is giving "just got out-lifted by the cardio bunny."',
-    'Bro, your whole look is a PR in disappointment.',
+    'Even your rest days look exhausting.',
+    'Built like a protein shake nobody finished.',
+    'Bro, your whole vibe is a failed PR.',
+    'Everything about this screams skipped leg decade.',
+    'Posing like the weights already gave up on you.',
+    'Someone lied to you about those proportions.',
+    'Your physique peaked in the parking lot.',
+    'Standing there like a gym membership gone to waste.',
   ],
 };
 
@@ -7434,7 +7435,7 @@ app.post('/api/roast-v3', async (req, res) => {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       max_tokens: 40,
-      temperature: tier === 'nuclear' ? 1.1 : tier === 'savage' ? 1.0 : 0.9,
+      temperature: (persona === 'gym_bro' && tier === 'nuclear') ? 0.95 : tier === 'nuclear' ? 1.1 : tier === 'savage' ? 1.0 : 0.9,
       messages: [
         { role: 'system', content: systemPrompt },
         {
@@ -7480,6 +7481,77 @@ app.post('/api/roast-v3', async (req, res) => {
             roast = cutMatch[1].replace(/[,;\s]+$/, '') + '.';
           }
         }
+      }
+    }
+
+    // gym_bro + nuclear only: anti-refusal cleanup + tighter shortening
+    if (persona === 'gym_bro' && tier === 'nuclear') {
+      // D) Strip refusal/hedging lead-ins before they trigger i_cant rejection
+      const refusalPrefixes = /^(bro,?\s*)?(I\s*can'?t|I'?m\s+not\s+gonna\s+lie|not\s+gonna\s+lie|honestly|to\s+be\s+fair|no\s+offense\s+but|I\s+mean),?\s*/i;
+      if (refusalPrefixes.test(roast)) {
+        const cleaned = roast.replace(refusalPrefixes, '').replace(/^./, c => c.toUpperCase());
+        // Only keep cleanup if result is coherent (5+ words, has terminal punctuation)
+        if (cleaned.split(/\s+/).length >= 5 && /[.!]/.test(cleaned)) {
+          console.log(`[roast-v3] gym_bro_nuclear refusal_strip: "${roast}" -> "${cleaned}"`);
+          roast = cleaned;
+        }
+      }
+
+      // C) Tighter shortening: strip filler words, prefer the harsher clause
+      // Remove common filler phrases that pad word count without adding punch
+      const fillerPatterns = [
+        /\b(like\s+)?literally\b/gi,
+        /\b(like\s+)?honestly\b/gi,
+        /\bI\s+swear\b/gi,
+        /\bno\s+cap\b/gi,
+        /\bfor\s+real\s+though\b/gi,
+        /\bstraight\s+up\b/gi,
+      ];
+      for (const fp of fillerPatterns) {
+        roast = roast.replace(fp, '').replace(/\s{2,}/g, ' ').trim();
+      }
+
+      // If two clauses joined by conjunction/comma, prefer the harsher/shorter one
+      const clauseSplit = roast.match(/^(.+?)\s*[,;]\s+(and|but|because|like|which)\s+(.+)$/i);
+      if (clauseSplit && roast.split(/\s+/).length > 14) {
+        const c1 = clauseSplit[1].trim();
+        const c3 = clauseSplit[3].trim();
+        const c1wc = c1.split(/\s+/).length;
+        const c3wc = c3.split(/\s+/).length;
+        // Prefer the clause that fits our 7-11 sweet spot, or the shorter one
+        if (c1wc >= 5 && c1wc <= 14) {
+          roast = /[.!]$/.test(c1) ? c1 : c1.replace(/[,;\s]+$/, '') + '.';
+        } else if (c3wc >= 5 && c3wc <= 14) {
+          const c3Cap = c3.replace(/^./, c => c.toUpperCase());
+          roast = /[.!]$/.test(c3Cap) ? c3Cap : c3Cap.replace(/[,;\s]+$/, '') + '.';
+        }
+      }
+
+      // Light polish: rewrite "looks like" / "you look like" to direct statement
+      const looksMatch = roast.match(/^(.*?\b)(you\s+)?look(?:s)?\s+like\s+(.+)$/i);
+      if (looksMatch) {
+        const prefix = (looksMatch[1] || '').trim();
+        const payload = looksMatch[3].trim();
+        // Try direct rewrite: "You look like a failed bulk" → "A failed bulk."
+        // Only if payload alone is 4–12 words and keeps terminal punctuation
+        const payloadWc = payload.split(/\s+/).length;
+        if (payloadWc >= 4 && payloadWc <= 12) {
+          // Capitalize payload and ensure punctuation
+          let direct = payload.replace(/^./, c => c.toUpperCase());
+          if (!/[.!]$/.test(direct)) direct = direct.replace(/[,;\s]+$/, '') + '.';
+          // If there was a meaningful prefix (e.g. "Bro,"), keep it
+          const candidate = prefix ? (prefix.replace(/[,;\s]+$/, '') + ', ' + direct.replace(/^./, c => c.toLowerCase())) : direct;
+          const candidateWc = candidate.split(/\s+/).length;
+          if (candidateWc >= 5 && candidateWc <= 14 && /[.!]$/.test(candidate)) {
+            console.log(`[roast-v3] gym_bro_nuclear looks_like_polish: "${roast}" -> "${candidate}"`);
+            roast = candidate;
+          }
+        }
+      }
+
+      // Ensure terminal punctuation after all cleanup
+      if (roast && !/[.!?]$/.test(roast)) {
+        roast = roast.replace(/[,;\s]+$/, '') + '.';
       }
     }
 
@@ -7536,6 +7608,14 @@ app.post('/api/roast-v3', async (req, res) => {
 
     const totalTime = Date.now() - t0;
     console.log(`[roast-v3] tier=${tier} persona=${persona} totalTime=${totalTime}ms fallback=${usedFallback}${reason ? ' reason=' + reason : ''}`);
+
+    // Final punctuation normalization: collapse duplicate end-of-string punct/quote patterns
+    // Targets actual GPT output artifacts, not theoretical combos
+    roast = roast
+      .replace(/([.!?])([""\u201C\u201D])[.!?]+([""\u201C\u201D])$/, '$1$2')   // ."." ."."" → ."
+      .replace(/([.!?])([""\u201C\u201D])[.!?]+$/, '$1$2')                      // .". !".. → ." !"
+      .replace(/([.!?])[.!?]+([""\u201C\u201D])$/, '$1$2')                      // !." ..". → !" ."
+      .replace(/([.!?])[.!?]+$/, '$1');                                          // !.. .. → ! .
 
     const meta = { usedFallback };
     if (usedFallback && reason) meta.rejectReason = reason;
