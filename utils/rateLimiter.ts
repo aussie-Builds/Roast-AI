@@ -1,5 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+// When true, all client-side usage limits and premium gating are bypassed.
+// Server-side cooldowns, rate limiting, and concurrency caps remain active.
+// Set EXPO_PUBLIC_CLOSED_TESTING=true in .env for closed testing builds.
+const CLOSED_TESTING_BUILD =
+  process.env.EXPO_PUBLIC_CLOSED_TESTING === 'true';
+
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 
 const KEYS = {
@@ -37,6 +43,7 @@ export async function setIsPremium(value: boolean): Promise<void> {
 export async function canRoast(
   level: RoastLevel,
 ): Promise<{ allowed: boolean; reason?: string }> {
+  if (CLOSED_TESTING_BUILD) return { allowed: true };
   if (await getIsPremium()) return { allowed: true };
 
   // Nuclear is premium-only
@@ -71,6 +78,7 @@ export async function canRoast(
 }
 
 export async function recordRoast(level: RoastLevel): Promise<void> {
+  if (CLOSED_TESTING_BUILD) return; // no counting during closed testing
   if (level === 'nuclear') return; // premium only, no counter needed
 
   const startKey = levelKey(level, 'start');
