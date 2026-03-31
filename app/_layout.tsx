@@ -14,6 +14,7 @@ export default function RootLayout() {
   const router = useRouter();
 
   useEffect(() => {
+    console.log('[RoastLab] Closed testing flag:', process.env.EXPO_PUBLIC_CLOSED_TESTING);
     identifyDevice();
     track('app_opened');
     initPurchases().then(() => restorePurchases());

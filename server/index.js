@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
 import sharp from 'sharp';
+import crypto from 'node:crypto';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -7344,6 +7345,63 @@ function applyTherapistOpener(roast) {
   return pick + ' ' + body;
 }
 
+// --- Repeat prevention for therapist (and extensible to other personas) ---
+// Keyed by imageHash:persona:tier → last N normalized roasts
+const recentRoastCache = new Map();
+const MAX_RECENT_ROASTS = 3;
+const RECENT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+const THERAPIST_OPENERS_RE = /^(interesting|fascinating|curious|that's notable|i see what's happening here)[.,]?\s*/i;
+
+function normalizeForComparison(text) {
+  return text
+    .toLowerCase()
+    .replace(THERAPIST_OPENERS_RE, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isSimilarToRecent(normalized, recentNormalized) {
+  for (const prev of recentNormalized) {
+    // Exact match after normalization
+    if (normalized === prev) return true;
+    // Check word overlap — if 70%+ of words are shared, consider it similar
+    const newWords = new Set(normalized.split(' '));
+    const prevWords = prev.split(' ');
+    if (prevWords.length === 0 || newWords.size === 0) continue;
+    const shared = prevWords.filter(w => newWords.has(w)).length;
+    const overlapRatio = shared / Math.max(newWords.size, prevWords.length);
+    if (overlapRatio >= 0.7) return true;
+  }
+  return false;
+}
+
+function getRecentRoasts(cacheKey) {
+  const entry = recentRoastCache.get(cacheKey);
+  if (!entry) return [];
+  if (Date.now() - entry.ts > RECENT_CACHE_TTL_MS) {
+    recentRoastCache.delete(cacheKey);
+    return [];
+  }
+  return entry.items;
+}
+
+function recordRoast(cacheKey, normalized) {
+  const entry = recentRoastCache.get(cacheKey) || { items: [], ts: Date.now() };
+  entry.items.push(normalized);
+  if (entry.items.length > MAX_RECENT_ROASTS) entry.items.shift();
+  entry.ts = Date.now();
+  recentRoastCache.set(cacheKey, entry);
+  // Prune cache if it grows too large (stale images)
+  if (recentRoastCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of recentRoastCache) {
+      if (now - v.ts > RECENT_CACHE_TTL_MS) recentRoastCache.delete(k);
+    }
+  }
+}
+
 const V3_TONES = {
   mild:    [
     'Tone: casual, playful teasing — like texting a friend about their photo. Funny and shareable, never mean.',
@@ -7640,6 +7698,7 @@ app.post('/api/roast-v3', async (req, res) => {
       .toBuffer();
     const resizeMs = Date.now() - tResize;
     const compressedBytes = compressed.length;
+    const imageHash = crypto.createHash('md5').update(compressed).digest('hex').slice(0, 12);
     const dataUrl = `data:image/jpeg;base64,${compressed.toString('base64')}`;
 
     console.log(`[roast-v3] image originalKB=${(originalBytes / 1024).toFixed(0)} compressedKB=${(compressedBytes / 1024).toFixed(0)} reduction=${(((originalBytes - compressedBytes) / originalBytes) * 100).toFixed(0)}% resizeMs=${resizeMs}`);
@@ -7968,6 +8027,53 @@ app.post('/api/roast-v3', async (req, res) => {
       const fb = V3_PERSONA_FALLBACKS[`${persona}_${tier}`] || V3_FALLBACKS[tier];
       roast = fb[Math.floor(Math.random() * fb.length)];
       usedFallback = true;
+    }
+
+    // --- Repeat prevention (therapist persona) ---
+    if (persona === 'therapist' && !usedFallback) {
+      const cacheKey = `${imageHash}:${persona}:${tier}`;
+      const recentNormalized = getRecentRoasts(cacheKey);
+      const normalized = normalizeForComparison(roast);
+
+      if (isSimilarToRecent(normalized, recentNormalized)) {
+        console.log(`[roast-v3] therapist repeat detected for ${cacheKey}: "${roast}" — regenerating once`);
+        // Single regeneration attempt
+        const regenCompletion = await openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          max_tokens: 40,
+          temperature: Math.min((tier === 'nuclear' ? 1.1 : tier === 'savage' ? 1.0 : 0.9) + 0.1, 1.2),
+          messages: [
+            { role: 'system', content: systemPrompt },
+            {
+              role: 'user',
+              content: [
+                { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } },
+                { type: 'text', text: 'Roast them.' },
+              ],
+            },
+            { role: 'assistant', content: roast },
+            { role: 'user', content: 'That observation was too similar to a previous one. Write a completely different observation about a different aspect of the photo. Same tone and format.' },
+          ],
+        });
+        let regenRoast = (regenCompletion.choices?.[0]?.message?.content || '').trim();
+        if ((regenRoast.startsWith('"') && regenRoast.endsWith('"')) || (regenRoast.startsWith("'") && regenRoast.endsWith("'"))) {
+          regenRoast = regenRoast.slice(1, -1).trim();
+        }
+        const thRegenCheck = therapistValidate(regenRoast);
+        if (thRegenCheck.ok) {
+          regenRoast = applyTherapistOpener(regenRoast);
+          const regenNormalized = normalizeForComparison(regenRoast);
+          if (!isSimilarToRecent(regenNormalized, recentNormalized)) {
+            console.log(`[roast-v3] therapist repeat resolved: "${regenRoast}"`);
+            roast = regenRoast;
+          } else {
+            console.log(`[roast-v3] therapist regen still similar, allowing original`);
+          }
+        } else {
+          console.log(`[roast-v3] therapist regen failed validation (${thRegenCheck.reason}), keeping original`);
+        }
+      }
+      recordRoast(cacheKey, normalizeForComparison(roast));
     }
 
     const totalTime = Date.now() - t0;
