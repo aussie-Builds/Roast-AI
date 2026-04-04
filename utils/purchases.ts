@@ -1,4 +1,4 @@
-import { Alert, Platform } from 'react-native';
+import { Platform } from 'react-native';
 import {
   initConnection,
   endConnection,
@@ -28,7 +28,6 @@ export async function initPurchases(): Promise<void> {
   try {
     const result = await initConnection();
     console.log('[IAP] Billing connection ready, result:', result);
-    if (__DEV__) Alert.alert('[IAP DEBUG]', `Billing init OK: ${JSON.stringify(result)}`);
 
     // Listen for successful purchases
     purchaseUpdateSub = purchaseUpdatedListener(
@@ -76,7 +75,6 @@ export async function getSubscriptionInfo(): Promise<ProductSubscription | null>
     const products = await fetchProducts({ skus: [SUBSCRIPTION_ID], type: 'subs' });
     const productList = products ?? [];
     console.log('[IAP] fetchProducts returned', productList.length, 'items:', JSON.stringify(productList.map(p => ({ id: p.id, type: p.type, platform: p.platform }))));
-    if (__DEV__) Alert.alert('[IAP DEBUG]', `fetchProducts returned ${productList.length} items`);
 
     const sub = productList.find((s) => s.id === SUBSCRIPTION_ID) as ProductSubscription | undefined;
     if (sub) {
@@ -141,7 +139,6 @@ export async function purchasePremium(): Promise<void> {
     }
 
     console.log('[IAP] Requesting purchase for:', SUBSCRIPTION_ID, 'with offerToken:', offerToken.substring(0, 30) + '...');
-    if (__DEV__) Alert.alert('[IAP DEBUG]', `About to requestPurchase with offerToken: ${offerToken.substring(0, 30)}...`);
 
     await requestPurchase({
       request: {
