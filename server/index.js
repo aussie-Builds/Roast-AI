@@ -63,6 +63,7 @@ const roastLimiter = rateLimit({
 if (!TUNING_MODE) {
   app.use('/api/roast', roastLimiter);
   app.use('/api/roast-v3', roastLimiter);
+  app.use('/api/battle-v1', roastLimiter);
 }
 
 // --- Abuse prevention: in-flight lock, cooldown, concurrency cap, kill switches ---
@@ -8105,6 +8106,169 @@ app.post('/api/roast-v3', async (req, res) => {
   } finally {
     releaseLock(clientKey);
     console.log('[roast-v3] completed', { clientKey, active: activeConcurrent });
+  }
+});
+
+// --- Battle V1: head-to-head roast comparison ---
+async function preprocessBattleImage(imageBase64, label) {
+  const rawBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+  const originalBytes = Buffer.byteLength(rawBase64, 'base64');
+  const tResize = Date.now();
+  const compressed = await sharp(Buffer.from(rawBase64, 'base64'))
+    .resize(512, 512, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 70 })
+    .toBuffer();
+  const resizeMs = Date.now() - tResize;
+  console.log(`[battle-v1] image-${label} originalKB=${(originalBytes / 1024).toFixed(0)} compressedKB=${(compressed.length / 1024).toFixed(0)} reduction=${(((originalBytes - compressed.length) / originalBytes) * 100).toFixed(0)}% resizeMs=${resizeMs}`);
+  return `data:image/jpeg;base64,${compressed.toString('base64')}`;
+}
+
+app.post('/api/battle-v1', async (req, res) => {
+  const clientKey = getClientKey(req);
+  const rejected = roastGuard(req, res);
+  if (rejected) return;
+
+  acquireLock(clientKey);
+  console.log('[battle-v1] accepted', { clientKey, tier: req.body?.level || 'medium', active: activeConcurrent });
+
+  const BATTLE_FALLBACK = {
+    roastA: "Even the camera couldn't pick a side.",
+    roastB: "Both photos showed up and still lost.",
+    winner: 'A',
+    verdict: 'Close enough.',
+    reason: 'One side still managed to lose harder.',
+  };
+
+  const t0 = Date.now();
+  try {
+    const result = await withTimeout((async () => {
+      const { imageBase64A, imageBase64B, level, persona: rawPersona } = req.body || {};
+      const tier = ['mild', 'medium', 'savage', 'nuclear'].includes(level) ? level : 'medium';
+      const persona = V3_VALID_PERSONAS.includes(rawPersona) ? rawPersona : 'default';
+
+      if (!imageBase64A || !imageBase64B) {
+        res.status(400).json({ error: 'missing_images', message: 'Both imageBase64A and imageBase64B are required.' });
+        return null;
+      }
+
+      // Preprocess both images in parallel
+      const [dataUrlA, dataUrlB] = await Promise.all([
+        preprocessBattleImage(imageBase64A, 'A'),
+        preprocessBattleImage(imageBase64B, 'B'),
+      ]);
+
+      // Build persona + tone prompt (reuse existing persona/tone data)
+      const personaBlock = V3_PERSONAS[`${persona}_${tier}`] || V3_PERSONAS[persona] || '';
+      const toneBlock = V3_TONES[tier] || V3_TONES.medium;
+      const roastSystemPrompt = (personaBlock ? personaBlock + ' ' : '') +
+        'Roast comedian. One-liner selfie roasts. ' + toneBlock +
+        ' ONE sentence, no preamble, no quotes. NEVER say you can\'t identify someone. NEVER apologise or say sorry. No hedging, no disclaimers.';
+
+      // Generate both roasts in parallel
+      const [completionA, completionB] = await Promise.all([
+        openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          max_tokens: 40,
+          temperature: tier === 'nuclear' ? 0.95 : tier === 'savage' ? 1.0 : 0.9,
+          messages: [
+            { role: 'system', content: roastSystemPrompt },
+            { role: 'user', content: [
+              { type: 'image_url', image_url: { url: dataUrlA, detail: 'low' } },
+              { type: 'text', text: 'Roast them.' },
+            ] },
+          ],
+        }),
+        openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          max_tokens: 40,
+          temperature: tier === 'nuclear' ? 0.95 : tier === 'savage' ? 1.0 : 0.9,
+          messages: [
+            { role: 'system', content: roastSystemPrompt },
+            { role: 'user', content: [
+              { type: 'image_url', image_url: { url: dataUrlB, detail: 'low' } },
+              { type: 'text', text: 'Roast them.' },
+            ] },
+          ],
+        }),
+      ]);
+
+      const roastA = (completionA.choices?.[0]?.message?.content || '').trim().replace(/^"|"$/g, '');
+      const roastB = (completionB.choices?.[0]?.message?.content || '').trim().replace(/^"|"$/g, '');
+
+      if (!roastA || !roastB) {
+        console.log('[battle-v1] empty roast generated, using fallback');
+        res.status(200).json(BATTLE_FALLBACK);
+        return null;
+      }
+
+      // Judge: compare both and pick a winner
+      const judgePrompt = `You are a roast battle judge. You will see two photos and their roasts. Pick a winner and explain why.
+
+Rules:
+- You MUST pick either A or B. No ties.
+- Compare confidence, awkwardness, chaos, pose, expression, effort, vibe mismatch, and roast damage.
+- Keep it funny, app-safe, and screenshot-friendly.
+- No protected traits, no hateful content, no sexual content, no self-harm, no identity attacks.
+
+Respond in EXACTLY this JSON format, nothing else:
+{"winner":"A or B","verdict":"4-10 word punchy line","reason":"One concise sentence explaining why."}`;
+
+      const judgeCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        max_tokens: 120,
+        temperature: 0.8,
+        messages: [
+          { role: 'system', content: judgePrompt },
+          { role: 'user', content: [
+            { type: 'image_url', image_url: { url: dataUrlA, detail: 'low' } },
+            { type: 'image_url', image_url: { url: dataUrlB, detail: 'low' } },
+            { type: 'text', text: `Photo A roast: "${roastA}"\nPhoto B roast: "${roastB}"\n\nJudge this battle.` },
+          ] },
+        ],
+      });
+
+      const judgeRaw = (judgeCompletion.choices?.[0]?.message?.content || '').trim();
+      console.log('[battle-v1] judge raw:', judgeRaw);
+
+      let judgeResult;
+      try {
+        // Extract JSON from response (handle markdown code blocks)
+        const jsonMatch = judgeRaw.match(/\{[\s\S]*\}/);
+        judgeResult = JSON.parse(jsonMatch ? jsonMatch[0] : judgeRaw);
+      } catch (parseErr) {
+        console.log('[battle-v1] judge parse failed, using fallback winner');
+        judgeResult = { winner: 'A', verdict: 'Too close to call cleanly.', reason: 'The judge short-circuited but A had more bite.' };
+      }
+
+      // Normalize winner to only A or B
+      const winner = judgeResult.winner === 'B' ? 'B' : 'A';
+      const verdict = (typeof judgeResult.verdict === 'string' ? judgeResult.verdict : 'No contest.').slice(0, 80);
+      const reason = (typeof judgeResult.reason === 'string' ? judgeResult.reason : 'One side simply had more roast energy.').slice(0, 200);
+
+      const totalTime = Date.now() - t0;
+      console.log(`[battle-v1] done in ${totalTime}ms`, { tier, persona, winner });
+
+      return { roastA, roastB, winner, verdict, reason };
+    })(), ROAST_TIMEOUT_MS);
+
+    if (result && !res.headersSent) {
+      res.status(200).json(result);
+    }
+  } catch (err) {
+    if (err.message === 'ROAST_TIMEOUT') {
+      console.error(`[battle-v1] timeout after ${ROAST_TIMEOUT_MS}ms`);
+      if (!res.headersSent) {
+        return res.status(504).json({ error: 'timeout', message: 'Battle took too long. Try again.' });
+      }
+    }
+    const totalTime = Date.now() - t0;
+    console.error(`[battle-v1] error after ${totalTime}ms:`, err.message || err);
+    if (!res.headersSent) {
+      return res.status(200).json(BATTLE_FALLBACK);
+    }
+  } finally {
+    releaseLock(clientKey);
+    console.log('[battle-v1] completed', { clientKey, active: activeConcurrent });
   }
 });
 

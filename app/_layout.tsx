@@ -40,6 +40,7 @@ export default function RootLayout() {
         />
         <Stack.Screen name="camera" options={{ title: 'Take Selfie', headerShown: false }} />
         <Stack.Screen name="preview" options={{ title: 'Your Roast' }} />
+        <Stack.Screen name="battle" options={{ title: 'Battle' }} />
         <Stack.Screen name="about" options={{ title: 'About', presentation: 'modal' }} />
       </Stack>
       <StatusBar style="auto" />

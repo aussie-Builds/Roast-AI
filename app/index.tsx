@@ -89,13 +89,19 @@ export default function HomeScreen() {
         </ScrollView>
       </View>
 
-      {/* Action button — anchored above safe area */}
+      {/* Action buttons — anchored above safe area */}
       <View style={[styles.buttonContainer, { paddingBottom: insets.bottom + 24 }]}>
         <Pressable
           style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
           onPress={() => router.push({ pathname: '/camera', params: { level, persona } })}
         >
           <Text style={styles.buttonText}>Take a Selfie</Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [styles.battleButton, pressed && styles.buttonPressed]}
+          onPress={() => router.push({ pathname: '/battle', params: { level, persona } })}
+        >
+          <Text style={styles.battleButtonText}>Battle</Text>
         </Pressable>
       </View>
     </LinearGradient>
@@ -198,7 +204,7 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
 
-  // Button
+  // Buttons
   button: {
     backgroundColor: '#B11212',
     paddingHorizontal: 48,
@@ -210,6 +216,15 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 4,
   },
+  battleButton: {
+    marginTop: 12,
+    paddingHorizontal: 48,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.25)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
   buttonPressed: {
     opacity: 0.8,
   },
@@ -217,5 +232,10 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: '700',
+  },
+  battleButtonText: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
