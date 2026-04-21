@@ -56,6 +56,7 @@ const PERSONAS = Object.keys(PERSONA_LABELS) as Persona[];
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PHOTO_SIZE = (SCREEN_WIDTH - 72) / 2; // 24px padding each side + 24px gap
+const RESULT_PHOTO_SIZE = (SCREEN_WIDTH - 48) / 2; // tighter gap, ~10% larger
 
 type BattleResult = {
   roastA: string;
@@ -314,68 +315,76 @@ export default function BattleScreen() {
     </>
   );
 
-  // ── Result view ──
+  // ── Result view (V2 layout) ──
   const renderResult = () => {
     if (!result) return null;
     const winnerColor = TIER_COLORS[level];
+    const winnerSide = result.winner;
+    const loserSide = winnerSide === 'A' ? 'B' : 'A';
+    const winnerRoast = winnerSide === 'A' ? result.roastA : result.roastB;
+    const loserRoast = loserSide === 'A' ? result.roastA : result.roastB;
 
     return (
       <ViewShot ref={viewShotRef} options={{ format: 'png', quality: 1 }}>
         <View style={styles.resultContainer}>
-          {/* Battle header — always visible in capture */}
-          <Text style={styles.captureTitle}>ROAST BATTLE</Text>
-
-          {/* Photos with winner highlight */}
-          <View style={styles.photoRow}>
-            <View style={[styles.resultPhotoWrap, result.winner === 'A' && { borderColor: winnerColor, borderWidth: 3 }]}>
+          {/* Photos — large, side by side */}
+          <View style={styles.resultPhotoRow}>
+            <View style={[
+              styles.resultPhotoWrap,
+              result.winner === 'A'
+                ? { borderColor: winnerColor, borderWidth: 3 }
+                : styles.resultPhotoLoser,
+            ]}>
               <Image source={{ uri: uriA! }} style={styles.resultPhoto} contentFit="cover" />
               {result.winner === 'A' && (
                 <View style={[styles.winnerBadge, { backgroundColor: winnerColor }]}>
                   <Text style={styles.winnerBadgeText}>WINNER</Text>
                 </View>
               )}
-              <View style={styles.photoLabel}>
-                <Text style={styles.photoLabelText}>A</Text>
-              </View>
             </View>
 
-            <Text style={styles.vsText}>VS</Text>
-
-            <View style={[styles.resultPhotoWrap, result.winner === 'B' && { borderColor: winnerColor, borderWidth: 3 }]}>
+            <View style={[
+              styles.resultPhotoWrap,
+              result.winner === 'B'
+                ? { borderColor: winnerColor, borderWidth: 3 }
+                : styles.resultPhotoLoser,
+            ]}>
               <Image source={{ uri: uriB! }} style={styles.resultPhoto} contentFit="cover" />
               {result.winner === 'B' && (
                 <View style={[styles.winnerBadge, { backgroundColor: winnerColor }]}>
                   <Text style={styles.winnerBadgeText}>WINNER</Text>
                 </View>
               )}
-              <View style={styles.photoLabel}>
-                <Text style={styles.photoLabelText}>B</Text>
-              </View>
             </View>
           </View>
 
-          {/* Roasts */}
-          <View style={styles.roastCard}>
-            <Text style={styles.roastLabel}>Photo A</Text>
-            <Text style={[styles.roastText, result.winner === 'A' && { color: winnerColor }]}>
-              {result.roastA}
+          {/* Verdict headline — small accent bar + white text */}
+          <View style={styles.verdictRow}>
+            <View style={[styles.verdictAccent, { backgroundColor: winnerColor }]} />
+            <Text style={styles.verdictText}>{result.verdict}</Text>
+          </View>
+
+          {/* Winner roast — left accent border */}
+          <View style={[styles.roastCard, styles.winnerRoastCard, { borderLeftColor: winnerColor }]}>
+            <Text style={styles.roastCardLabel}>
+              {winnerSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
+            </Text>
+            <Text style={styles.roastCardText}>
+              {winnerRoast}
             </Text>
           </View>
 
-          <View style={styles.roastCard}>
-            <Text style={styles.roastLabel}>Photo B</Text>
-            <Text style={[styles.roastText, result.winner === 'B' && { color: winnerColor }]}>
-              {result.roastB}
+          {/* Loser roast — neutral card */}
+          <View style={[styles.roastCard, styles.loserRoastCard]}>
+            <Text style={[styles.roastCardLabel, styles.loserLabel]}>
+              {loserSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
+            </Text>
+            <Text style={[styles.roastCardText, styles.loserText]}>
+              {loserRoast}
             </Text>
           </View>
 
-          {/* Verdict */}
-          <View style={[styles.verdictCard, { borderColor: winnerColor }]}>
-            <Text style={[styles.verdictText, { color: winnerColor }]}>{result.verdict}</Text>
-            <Text style={styles.reasonText}>{result.reason}</Text>
-          </View>
-
-          {/* Watermark — always present but only prominent during capture */}
+          {/* Watermark */}
           <View style={styles.watermark}>
             <View style={styles.watermarkRow}>
               <Text style={styles.watermarkBrand}>ROASTLAB</Text>
@@ -649,28 +658,28 @@ const styles = StyleSheet.create({
   },
 
   // Result (capture area)
-  captureTitle: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 13,
-    fontWeight: '800',
-    letterSpacing: 3,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
   resultContainer: {
     alignItems: 'center',
     backgroundColor: '#0f0f12',
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 12,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  resultPhotoRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 8,
   },
   resultPhotoWrap: {
-    width: PHOTO_SIZE,
-    height: PHOTO_SIZE,
-    borderRadius: 16,
+    width: RESULT_PHOTO_SIZE,
+    height: RESULT_PHOTO_SIZE * 1.25,
+    borderRadius: 14,
     borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.2)',
+    borderColor: 'rgba(255,255,255,0.15)',
     overflow: 'hidden',
+  },
+  resultPhotoLoser: {
+    opacity: 0.75,
   },
   resultPhoto: {
     width: '100%',
@@ -681,7 +690,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    paddingVertical: 5,
+    paddingVertical: 6,
     alignItems: 'center',
   },
   winnerBadgeText: {
@@ -691,49 +700,64 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
 
-  // Roast cards
-  roastCard: {
-    width: '100%',
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 10,
-  },
-  roastLabel: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1,
-    marginBottom: 6,
-  },
-  roastText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-    lineHeight: 22,
-  },
-
   // Verdict
-  verdictCard: {
-    width: '100%',
-    borderWidth: 1.5,
-    borderRadius: 14,
-    padding: 16,
+  verdictRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  verdictAccent: {
+    width: 3,
+    height: 18,
+    borderRadius: 1.5,
   },
   verdictText: {
-    fontSize: 20,
+    color: '#fff',
+    fontSize: 18,
     fontWeight: '800',
     textAlign: 'center',
+  },
+
+  // Shared roast card base
+  roastCard: {
+    width: '100%',
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    padding: 14,
+    marginBottom: 8,
+  },
+  roastCardLabel: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+    marginBottom: 5,
+  },
+  roastCardText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 21,
+  },
+
+  // Winner card — left accent, slightly more presence
+  winnerRoastCard: {
+    borderLeftWidth: 3,
+    paddingVertical: 16,
+  },
+
+  // Loser card — slightly dimmer
+  loserRoastCard: {
+    backgroundColor: 'rgba(255,255,255,0.04)',
     marginBottom: 6,
   },
-  reasonText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
+  loserLabel: {
+    color: 'rgba(255,255,255,0.3)',
+  },
+  loserText: {
+    color: 'rgba(255,255,255,0.55)',
   },
 
   // Error
@@ -845,7 +869,7 @@ const styles = StyleSheet.create({
   // Watermark (matches preview.tsx branding)
   watermark: {
     alignItems: 'center',
-    marginTop: 6,
+    marginTop: 4,
     paddingBottom: 4,
   },
   watermarkRow: {

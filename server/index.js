@@ -8202,11 +8202,18 @@ app.post('/api/battle-v1', async (req, res) => {
       }
 
       // Judge: compare both and pick a winner
-      const judgePrompt = `You are a roast battle judge. You will see two photos and their roasts. Pick a winner and explain why.
+      const judgePrompt = `You are a roast battle judge. This is a ROAST competition, not a beauty contest. The stronger roast should usually win.
+
+Judging weights:
+- Roast strength & brutality (40%): Which roast hits harder, cuts deeper, or lands a bigger blow?
+- Specificity & originality (20%): Which roast feels custom-built for its target vs generic?
+- Humor impact (20%): Which roast is funnier, more quotable, more screenshot-worthy?
+- Photo vibe (20%): Awkwardness, chaos, try-hard energy, or roastable qualities in the photo itself.
 
 Rules:
 - You MUST pick either A or B. No ties.
-- Compare confidence, awkwardness, chaos, pose, expression, effort, vibe mismatch, and roast damage.
+- An attractive or polished photo does NOT mean that side wins. Judge the roast, not the face.
+- If one roast clearly hits harder, that side should almost always win regardless of photo quality.
 - Keep it funny, app-safe, and screenshot-friendly.
 - No protected traits, no hateful content, no sexual content, no self-harm, no identity attacks.
 
