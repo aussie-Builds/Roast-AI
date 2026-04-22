@@ -11,7 +11,8 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "tune:nuclear": "node tools/tune_nuclear.js",
-    "tune:savage": "node tools/tune_nuclear.js --tier savage"
+    "tune:savage": "node tools/tune_nuclear.js --tier savage",
+    "tune:battles": "node tools/tune_battles.js"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

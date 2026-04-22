@@ -1,12 +1,14 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, ReactNode } from 'react';
 import {
   StyleSheet,
   Pressable,
+  PressableProps,
   View,
   Text,
   ScrollView,
   ActivityIndicator,
   Alert,
+  Animated,
   Dimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
@@ -54,6 +56,17 @@ const PERSONA_LABELS: Record<Persona, string> = {
 const LEVELS: RoastLevel[] = ['mild', 'medium', 'savage', 'nuclear'];
 const PERSONAS = Object.keys(PERSONA_LABELS) as Persona[];
 
+const LOADING_PHRASES = [
+  'Reviewing poor choices...',
+  'Deciding who lost harder...',
+  'Searching for redeeming qualities...',
+  'Measuring secondhand embarrassment...',
+  'One of these photos is cooked...',
+  'Comparing disasters...',
+  'Assessing the damage...',
+];
+const LOADING_ROTATE_MS = 1200;
+
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PHOTO_SIZE = (SCREEN_WIDTH - 72) / 2; // 24px padding each side + 24px gap
 const RESULT_PHOTO_SIZE = (SCREEN_WIDTH - 48) / 2; // tighter gap, ~10% larger
@@ -65,6 +78,49 @@ type BattleResult = {
   verdict: string;
   reason: string;
 };
+
+// Tiny press-feedback wrapper: same API as Pressable, adds a spring scale on
+// press-in / release. Layout-safe because the wrapper inherits flex from `flex`.
+function PressableScale({
+  children,
+  flex,
+  disabled,
+  onPressIn,
+  onPressOut,
+  ...rest
+}: PressableProps & { children: ReactNode; flex?: boolean }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  return (
+    <Animated.View style={[flex && { flex: 1 }, { transform: [{ scale }] }]}>
+      <Pressable
+        {...rest}
+        disabled={disabled}
+        onPressIn={(e) => {
+          if (!disabled) {
+            Animated.spring(scale, {
+              toValue: 0.96,
+              useNativeDriver: true,
+              speed: 50,
+              bounciness: 0,
+            }).start();
+          }
+          onPressIn?.(e);
+        }}
+        onPressOut={(e) => {
+          Animated.spring(scale, {
+            toValue: 1,
+            useNativeDriver: true,
+            speed: 30,
+            bounciness: 6,
+          }).start();
+          onPressOut?.(e);
+        }}
+      >
+        {children}
+      </Pressable>
+    </Animated.View>
+  );
+}
 
 async function getOptimizedBase64(uri: string): Promise<string> {
   const result = await manipulateAsync(
@@ -91,11 +147,204 @@ export default function BattleScreen() {
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
   const [shareMode, setShareMode] = useState(false);
+  const [loadingPhraseIdx, setLoadingPhraseIdx] = useState(0);
   const viewShotRef = useRef<ViewShot>(null);
+
+  // Winner-reveal animations. A and B each have their own scale/opacity so the
+  // winner pops while the loser dims and shrinks slightly.
+  const scaleA = useRef(new Animated.Value(1)).current;
+  const scaleB = useRef(new Animated.Value(1)).current;
+  const opacityA = useRef(new Animated.Value(1)).current;
+  const opacityB = useRef(new Animated.Value(1)).current;
+  const badgeScale = useRef(new Animated.Value(0)).current;
+  const badgeOpacity = useRef(new Animated.Value(0)).current;
+  // Glow flash on the winner border at reveal — single value since only one
+  // wrap shows the glow at a time.
+  const glowOpacity = useRef(new Animated.Value(0)).current;
+  // Verdict + roast cards fade/slide in (single 0→1 value each, interpolated).
+  const verdictAnim = useRef(new Animated.Value(0)).current;
+  const winnerCardAnim = useRef(new Animated.Value(0)).current;
+  const loserCardAnim = useRef(new Animated.Value(0)).current;
+  // VS pulse during loading.
+  const vsScale = useRef(new Animated.Value(1)).current;
+  // Loading panel fade-in.
+  const loadingPanelOpacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     track('battle_opened');
   }, []);
+
+  // Rotate the loading phrase while a battle is in flight. Random start so
+  // back-to-back rematches don't always open with the same line.
+  useEffect(() => {
+    if (!isLoading) return;
+    setLoadingPhraseIdx(Math.floor(Math.random() * LOADING_PHRASES.length));
+    const id = setInterval(() => {
+      setLoadingPhraseIdx((i) => (i + 1) % LOADING_PHRASES.length);
+    }, LOADING_ROTATE_MS);
+    return () => clearInterval(id);
+  }, [isLoading]);
+
+  // VS pulse while loading: subtle 1.0 ↔ 1.18 loop on the UI thread.
+  useEffect(() => {
+    if (!isLoading) {
+      vsScale.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(vsScale, { toValue: 1.18, duration: 520, useNativeDriver: true }),
+        Animated.timing(vsScale, { toValue: 1, duration: 520, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isLoading, vsScale]);
+
+  // Loading panel fades in when work starts, snaps back to 0 on finish.
+  useEffect(() => {
+    if (isLoading) {
+      loadingPanelOpacity.setValue(0);
+      Animated.timing(loadingPanelOpacity, {
+        toValue: 1,
+        duration: 220,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      loadingPanelOpacity.setValue(0);
+    }
+  }, [isLoading, loadingPanelOpacity]);
+
+  // Winner reveal when result arrives. Reset on rematch (result === null).
+  // Sequence (all native-driven, total ~520ms):
+  //   t=0    winner pops 0.96→1.06→1.0 (overshoot), loser dims + shrinks, border glow flashes
+  //   t=120  WINNER badge pops in (spring with overshoot)
+  //   t=180  verdict fades + slides up
+  //   t=260  winner roast card fades + slides up
+  //   t=340  loser roast card fades + slides up
+  useEffect(() => {
+    if (!result) {
+      scaleA.setValue(1);
+      scaleB.setValue(1);
+      opacityA.setValue(1);
+      opacityB.setValue(1);
+      badgeScale.setValue(0);
+      badgeOpacity.setValue(0);
+      glowOpacity.setValue(0);
+      verdictAnim.setValue(0);
+      winnerCardAnim.setValue(0);
+      loserCardAnim.setValue(0);
+      return;
+    }
+    const winnerIsA = result.winner === 'A';
+    const winnerScale = winnerIsA ? scaleA : scaleB;
+    const loserScale = winnerIsA ? scaleB : scaleA;
+    const loserOpacity = winnerIsA ? opacityB : opacityA;
+
+    // Pre-set winner small so the spring reads as a clear pop, not a wiggle.
+    winnerScale.setValue(0.96);
+
+    Animated.parallel([
+      // Winner pop: snappy overshoot, then settle.
+      Animated.sequence([
+        Animated.spring(winnerScale, {
+          toValue: 1.06,
+          useNativeDriver: true,
+          speed: 22,
+          bounciness: 0,
+        }),
+        Animated.spring(winnerScale, {
+          toValue: 1.0,
+          useNativeDriver: true,
+          speed: 16,
+          bounciness: 6,
+        }),
+      ]),
+      // Loser: clearer dim + tiny scale-down for contrast.
+      Animated.timing(loserOpacity, {
+        toValue: 0.5,
+        duration: 280,
+        useNativeDriver: true,
+      }),
+      Animated.timing(loserScale, {
+        toValue: 0.97,
+        duration: 280,
+        useNativeDriver: true,
+      }),
+      // Border glow flash on winner — bright, then fades.
+      Animated.sequence([
+        Animated.timing(glowOpacity, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+        Animated.timing(glowOpacity, {
+          toValue: 0,
+          duration: 320,
+          useNativeDriver: true,
+        }),
+      ]),
+      // Badge pop @ 120ms.
+      Animated.sequence([
+        Animated.delay(120),
+        Animated.parallel([
+          Animated.spring(badgeScale, {
+            toValue: 1,
+            useNativeDriver: true,
+            speed: 18,
+            bounciness: 14,
+          }),
+          Animated.timing(badgeOpacity, {
+            toValue: 1,
+            duration: 180,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+      // Verdict slide-in @ 180ms.
+      Animated.sequence([
+        Animated.delay(180),
+        Animated.spring(verdictAnim, {
+          toValue: 1,
+          useNativeDriver: true,
+          speed: 20,
+          bounciness: 4,
+        }),
+      ]),
+      // Winner roast card @ 260ms.
+      Animated.sequence([
+        Animated.delay(260),
+        Animated.spring(winnerCardAnim, {
+          toValue: 1,
+          useNativeDriver: true,
+          speed: 20,
+          bounciness: 4,
+        }),
+      ]),
+      // Loser roast card @ 340ms.
+      Animated.sequence([
+        Animated.delay(340),
+        Animated.spring(loserCardAnim, {
+          toValue: 1,
+          useNativeDriver: true,
+          speed: 20,
+          bounciness: 4,
+        }),
+      ]),
+    ]).start();
+  }, [
+    result,
+    scaleA,
+    scaleB,
+    opacityA,
+    opacityB,
+    badgeScale,
+    badgeOpacity,
+    glowOpacity,
+    verdictAnim,
+    winnerCardAnim,
+    loserCardAnim,
+  ]);
 
   const pickImage = async (slot: 'A' | 'B') => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -251,7 +500,9 @@ export default function BattleScreen() {
           </View>
         </Pressable>
 
-        <Text style={styles.vsText}>VS</Text>
+        <Animated.Text style={[styles.vsText, { transform: [{ scale: vsScale }] }]}>
+          VS
+        </Animated.Text>
 
         <Pressable
           style={({ pressed }) => [styles.photoSlot, pressed && styles.photoSlotPressed]}
@@ -270,6 +521,16 @@ export default function BattleScreen() {
           </View>
         </Pressable>
       </View>
+
+      {/* Loading focus — sits right under the photos so the eye stays on the action */}
+      {isLoading && (
+        <Animated.View style={[styles.loadingPanel, { opacity: loadingPanelOpacity }]}>
+          <View style={[styles.loadingAccent, { backgroundColor: TIER_COLORS[level] }]} />
+          <Text style={styles.loadingPhraseText} numberOfLines={1}>
+            {LOADING_PHRASES[loadingPhraseIdx]}
+          </Text>
+        </Animated.View>
+      )}
 
       {/* Level selector */}
       <View style={styles.tierRow}>
@@ -329,60 +590,109 @@ export default function BattleScreen() {
         <View style={styles.resultContainer}>
           {/* Photos — large, side by side */}
           <View style={styles.resultPhotoRow}>
-            <View style={[
+            <Animated.View style={[
               styles.resultPhotoWrap,
-              result.winner === 'A'
-                ? { borderColor: winnerColor, borderWidth: 3 }
-                : styles.resultPhotoLoser,
+              result.winner === 'A' && { borderColor: winnerColor, borderWidth: 3 },
+              { opacity: opacityA, transform: [{ scale: scaleA }] },
             ]}>
               <Image source={{ uri: uriA! }} style={styles.resultPhoto} contentFit="cover" />
               {result.winner === 'A' && (
-                <View style={[styles.winnerBadge, { backgroundColor: winnerColor }]}>
-                  <Text style={styles.winnerBadgeText}>WINNER</Text>
-                </View>
+                <>
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[styles.winnerGlow, { borderColor: winnerColor, opacity: glowOpacity }]}
+                  />
+                  <Animated.View style={[
+                    styles.winnerBadge,
+                    { backgroundColor: winnerColor, opacity: badgeOpacity, transform: [{ scale: badgeScale }] },
+                  ]}>
+                    <Text style={styles.winnerBadgeText}>WINNER</Text>
+                  </Animated.View>
+                </>
               )}
-            </View>
+            </Animated.View>
 
-            <View style={[
+            <Animated.View style={[
               styles.resultPhotoWrap,
-              result.winner === 'B'
-                ? { borderColor: winnerColor, borderWidth: 3 }
-                : styles.resultPhotoLoser,
+              result.winner === 'B' && { borderColor: winnerColor, borderWidth: 3 },
+              { opacity: opacityB, transform: [{ scale: scaleB }] },
             ]}>
               <Image source={{ uri: uriB! }} style={styles.resultPhoto} contentFit="cover" />
               {result.winner === 'B' && (
-                <View style={[styles.winnerBadge, { backgroundColor: winnerColor }]}>
-                  <Text style={styles.winnerBadgeText}>WINNER</Text>
-                </View>
+                <>
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[styles.winnerGlow, { borderColor: winnerColor, opacity: glowOpacity }]}
+                  />
+                  <Animated.View style={[
+                    styles.winnerBadge,
+                    { backgroundColor: winnerColor, opacity: badgeOpacity, transform: [{ scale: badgeScale }] },
+                  ]}>
+                    <Text style={styles.winnerBadgeText}>WINNER</Text>
+                  </Animated.View>
+                </>
               )}
-            </View>
+            </Animated.View>
           </View>
 
           {/* Verdict headline — small accent bar + white text */}
-          <View style={styles.verdictRow}>
+          <Animated.View
+            style={[
+              styles.verdictRow,
+              {
+                opacity: verdictAnim,
+                transform: [{
+                  translateY: verdictAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }),
+                }],
+              },
+            ]}
+          >
             <View style={[styles.verdictAccent, { backgroundColor: winnerColor }]} />
             <Text style={styles.verdictText}>{result.verdict}</Text>
-          </View>
+          </Animated.View>
 
           {/* Winner roast — left accent border */}
-          <View style={[styles.roastCard, styles.winnerRoastCard, { borderLeftColor: winnerColor }]}>
+          <Animated.View
+            style={[
+              styles.roastCard,
+              styles.winnerRoastCard,
+              { borderLeftColor: winnerColor },
+              {
+                opacity: winnerCardAnim,
+                transform: [{
+                  translateY: winnerCardAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }),
+                }],
+              },
+            ]}
+          >
             <Text style={styles.roastCardLabel}>
               {winnerSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
             </Text>
             <Text style={styles.roastCardText}>
               {winnerRoast}
             </Text>
-          </View>
+          </Animated.View>
 
           {/* Loser roast — neutral card */}
-          <View style={[styles.roastCard, styles.loserRoastCard]}>
+          <Animated.View
+            style={[
+              styles.roastCard,
+              styles.loserRoastCard,
+              {
+                opacity: loserCardAnim,
+                transform: [{
+                  translateY: loserCardAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }),
+                }],
+              },
+            ]}
+          >
             <Text style={[styles.roastCardLabel, styles.loserLabel]}>
               {loserSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
             </Text>
             <Text style={[styles.roastCardText, styles.loserText]}>
               {loserRoast}
             </Text>
-          </View>
+          </Animated.View>
 
           {/* Watermark */}
           <View style={styles.watermark}>
@@ -430,7 +740,7 @@ export default function BattleScreen() {
       {/* Bottom actions */}
       <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 16 }]}>
         {!result ? (
-          <Pressable
+          <PressableScale
             style={({ pressed }) => [
               styles.battleButton,
               { backgroundColor: TIER_BUTTON_COLORS[level] },
@@ -448,43 +758,43 @@ export default function BattleScreen() {
             ) : (
               <Text style={styles.battleButtonText}>Battle</Text>
             )}
-          </Pressable>
+          </PressableScale>
         ) : (
           <>
             <View style={styles.resultButtonRow}>
-              <Pressable
+              <PressableScale
+                flex
                 style={({ pressed }) => [
                   styles.battleButton,
-                  styles.resultButtonItem,
                   { backgroundColor: TIER_BUTTON_COLORS[level] },
                   pressed && styles.buttonPressed,
                 ]}
                 onPress={handleRematch}
               >
                 <Text style={styles.battleButtonText}>Rematch</Text>
-              </Pressable>
+              </PressableScale>
             </View>
             <View style={styles.shareRow}>
-              <Pressable
+              <PressableScale
+                flex
                 style={({ pressed }) => [
                   styles.shareButton,
-                  styles.shareRowItem,
                   pressed && styles.buttonPressed,
                 ]}
                 onPress={handleShare}
               >
                 <Text style={styles.shareButtonText}>Share Result</Text>
-              </Pressable>
-              <Pressable
+              </PressableScale>
+              <PressableScale
+                flex
                 style={({ pressed }) => [
                   styles.shareButton,
-                  styles.shareRowItem,
                   pressed && styles.buttonPressed,
                 ]}
                 onPress={handleSave}
               >
                 <Text style={styles.shareButtonText}>Save Image</Text>
-              </Pressable>
+              </PressableScale>
             </View>
           </>
         )}
@@ -678,9 +988,6 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.15)',
     overflow: 'hidden',
   },
-  resultPhotoLoser: {
-    opacity: 0.75,
-  },
   resultPhoto: {
     width: '100%',
     height: '100%',
@@ -692,6 +999,17 @@ const styles = StyleSheet.create({
     right: 0,
     paddingVertical: 6,
     alignItems: 'center',
+  },
+  // Inner-edge glow ring drawn over the winner photo on reveal. Sits inside
+  // the wrap (which has overflow: hidden), so it reads as a sharp colored ring.
+  winnerGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 14,
+    borderWidth: 4,
   },
   winnerBadgeText: {
     color: '#fff',
@@ -815,6 +1133,29 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  loadingPanel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: -8,
+    marginBottom: 16,
+    paddingHorizontal: 12,
+    minHeight: 26,
+  },
+  loadingAccent: {
+    width: 4,
+    height: 22,
+    borderRadius: 2,
+  },
+  loadingPhraseText: {
+    color: '#ffffff',
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+    textAlign: 'center',
+    flexShrink: 1,
   },
   resultButtonRow: {
     flexDirection: 'row',
