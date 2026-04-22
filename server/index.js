@@ -8201,35 +8201,48 @@ app.post('/api/battle-v1', async (req, res) => {
         return null;
       }
 
-      // Judge: compare both and pick a winner
-      const judgePrompt = `You are a roast battle judge. This is a ROAST competition, not a beauty contest. The stronger roast should usually win.
+      // Judge: compare the two ROASTS head-to-head. Roast quality is primary;
+      // photo vibe is only a tiebreaker when the roasts are genuinely close.
+      const judgePrompt = `You are a roast battle judge. You are judging the TWO ROASTS, not the two faces.
 
-Judging weights:
-- Roast strength & brutality (40%): Which roast hits harder, cuts deeper, or lands a bigger blow?
-- Specificity & originality (20%): Which roast feels custom-built for its target vs generic?
-- Humor impact (20%): Which roast is funnier, more quotable, more screenshot-worthy?
-- Photo vibe (20%): Awkwardness, chaos, try-hard energy, or roastable qualities in the photo itself.
+PRIMARY criteria — compare roast A vs roast B directly on:
+- Humor impact: which one actually makes you laugh harder?
+- Sharpness: which one cuts cleaner, less mushy?
+- Specificity: which one feels built for THIS target vs swappable filler?
+- Originality: which one avoids tired roast tropes?
+- Punchline strength: which one lands a real ending vs trailing off?
 
-Rules:
-- You MUST pick either A or B. No ties.
-- An attractive or polished photo does NOT mean that side wins. Judge the roast, not the face.
-- If one roast clearly hits harder, that side should almost always win regardless of photo quality.
-- Keep it funny, app-safe, and screenshot-friendly.
-- No protected traits, no hateful content, no sexual content, no self-harm, no identity attacks.
+SECONDARY (tiebreaker only): if the two roasts are genuinely close on the above, then — and only then — let photo vibe (awkwardness, try-hard energy, confidence, chaos) decide.
 
-Respond in EXACTLY this JSON format, nothing else:
-{"winner":"A or B","verdict":"4-10 word punchy line","reason":"One concise sentence explaining why."}`;
+If one roast is clearly stronger on the primary criteria, that side wins. Do NOT flip the result because the other photo looks more awkward or more polished.
+
+VERDICT RULES (this is critical):
+- The verdict headline MUST reference the THEME of the WINNING roast. Pull a noun, image, or angle directly from the winning roast and build the headline around it.
+- Examples of theme-anchored verdicts:
+  - winning roast about laundry → "Spin cycle wins this round."
+  - winning roast about a fake smile → "Smile sold separately."
+  - winning roast about an awkward pose → "Posture lost the war."
+  - winning roast about gym selfies → "Reps couldn't save this one."
+- Do NOT write generic filler like "Close one.", "No contest.", "A took it.", "Better roast wins." — those are banned.
+- Keep it 4-9 words, punchy, screenshot-friendly, app-safe.
+
+The "reason" field should explain in one sentence why the winning roast beat the other on the primary criteria (cite what made it sharper/funnier/more specific). Don't talk about the photos in the reason unless it was a true tiebreaker.
+
+Safety: no protected traits, no hateful content, no sexual content, no self-harm.
+
+Respond in EXACTLY this JSON, nothing else:
+{"winner":"A or B","verdict":"4-9 word headline tied to winning roast's theme","reason":"One sentence on why that roast won."}`;
 
       const judgeCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
-        max_tokens: 120,
-        temperature: 0.8,
+        max_tokens: 140,
+        temperature: 0.7,
         messages: [
           { role: 'system', content: judgePrompt },
           { role: 'user', content: [
+            { type: 'text', text: `ROAST A: "${roastA}"\nROAST B: "${roastB}"\n\nCompare the two roasts head-to-head on humor, sharpness, specificity, originality, and punchline. Pick the stronger roast. Then write a verdict headline that references the THEME of the winning roast (a word or image from it). The two photos are attached only as a tiebreaker if the roasts are genuinely close.` },
             { type: 'image_url', image_url: { url: dataUrlA, detail: 'low' } },
             { type: 'image_url', image_url: { url: dataUrlB, detail: 'low' } },
-            { type: 'text', text: `Photo A roast: "${roastA}"\nPhoto B roast: "${roastB}"\n\nJudge this battle.` },
           ] },
         ],
       });
@@ -8244,13 +8257,25 @@ Respond in EXACTLY this JSON format, nothing else:
         judgeResult = JSON.parse(jsonMatch ? jsonMatch[0] : judgeRaw);
       } catch (parseErr) {
         console.log('[battle-v1] judge parse failed, using fallback winner');
-        judgeResult = { winner: 'A', verdict: 'Too close to call cleanly.', reason: 'The judge short-circuited but A had more bite.' };
+        judgeResult = { winner: 'A', verdict: 'Roast A landed cleaner.', reason: 'Judge response unparseable; defaulted to A which had a tighter punchline.' };
       }
 
       // Normalize winner to only A or B
       const winner = judgeResult.winner === 'B' ? 'B' : 'A';
-      const verdict = (typeof judgeResult.verdict === 'string' ? judgeResult.verdict : 'No contest.').slice(0, 80);
-      const reason = (typeof judgeResult.reason === 'string' ? judgeResult.reason : 'One side simply had more roast energy.').slice(0, 200);
+
+      // Reject generic verdict filler — if we get one, fall back to a theme-anchored
+      // line built from the first noun-ish word of the winning roast.
+      const winningRoast = winner === 'A' ? roastA : roastB;
+      const GENERIC_VERDICT_RX = /^(close( one)?\.?|no contest\.?|too close.*|better roast wins\.?|[ab] took it\.?|[ab] wins\.?|tough call\.?)$/i;
+      let verdict = (typeof judgeResult.verdict === 'string' ? judgeResult.verdict : '').trim().slice(0, 80);
+      if (!verdict || GENERIC_VERDICT_RX.test(verdict)) {
+        const anchorWord = (winningRoast.match(/\b([A-Za-z]{4,})\b/g) || [])
+          .filter(w => !/^(this|that|with|your|youre|like|just|even|only|when|then|they|them|from|into|some|most|been|have|will|cant|dont|isnt|youve|theyre)$/i.test(w))[0];
+        verdict = anchorWord
+          ? `${anchorWord.charAt(0).toUpperCase() + anchorWord.slice(1).toLowerCase()} wins this one.`
+          : `Roast ${winner} landed the punchline.`;
+      }
+      const reason = (typeof judgeResult.reason === 'string' ? judgeResult.reason : 'That roast hit sharper on the punchline.').slice(0, 200);
 
       const totalTime = Date.now() - t0;
       console.log(`[battle-v1] done in ${totalTime}ms`, { tier, persona, winner });
