@@ -24,7 +24,7 @@ import * as MediaLibrary from 'expo-media-library';
 
 import { API_BASE_URL } from '@/constants/api';
 import { canRoast, recordRoast } from '@/utils/rateLimiter';
-import { track } from '@/utils/analytics';
+import { track, getDeviceId } from '@/utils/analytics';
 import UpgradeModal from '@/components/UpgradeModal';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
@@ -388,19 +388,24 @@ export default function BattleScreen() {
     track('battle_started', { level, persona });
 
     try {
-      const [base64A, base64B] = await Promise.all([
+      const [base64A, base64B, deviceId] = await Promise.all([
         getOptimizedBase64(uriA),
         getOptimizedBase64(uriB),
+        getDeviceId(),
       ]);
 
       const response = await fetch(`${API_BASE_URL}/api/battle-v1`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-device-id': deviceId,
+        },
         body: JSON.stringify({
           imageBase64A: base64A,
           imageBase64B: base64B,
           level,
           persona,
+          clientId: deviceId,
         }),
       });
 

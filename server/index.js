@@ -41,9 +41,23 @@ function jsonError(res, status, error, message) {
   return res.status(status).type('application/json').json({ error, message });
 }
 
-// Shared client key: clientId → x-device-id → IPv6-safe IP fallback
+// Shared client key: clientId (body) → x-device-id (header) → IPv6-safe IP fallback.
+// IP fallback is intentional: keeps abuse protection working for older clients,
+// non-app callers, or any request that arrives without a device id. App requests
+// should always supply a persistent device id so users on shared NAT/Wi-Fi/VPN
+// aren't bucketed together.
 function getClientKey(req) {
-  return req.body?.clientId || req.headers['x-device-id'] || (req.ip && ipKeyGenerator(req.ip)) || 'anon';
+  const fromBody = typeof req.body?.clientId === 'string' && req.body.clientId.trim();
+  if (fromBody) return req.body.clientId.trim();
+  const fromHeader = typeof req.headers['x-device-id'] === 'string' && req.headers['x-device-id'].trim();
+  if (fromHeader) return req.headers['x-device-id'].trim();
+  return (req.ip && ipKeyGenerator(req.ip)) || 'anon';
+}
+
+function getClientKeySource(req) {
+  if (typeof req.body?.clientId === 'string' && req.body.clientId.trim()) return 'clientId';
+  if (typeof req.headers['x-device-id'] === 'string' && req.headers['x-device-id'].trim()) return 'x-device-id';
+  return 'ip';
 }
 
 // Rate limiter for roast endpoints (configurable via env)
@@ -6567,7 +6581,7 @@ app.post('/api/roast', async (req, res) => {
   if (rejected) return;
 
   acquireLock(clientKey);
-  console.log('[roast] accepted', { clientKey, tier: req.body?.level || 'medium', active: activeConcurrent });
+  console.log('[roast] accepted', { clientKey, keySource: getClientKeySource(req), tier: req.body?.level || 'medium', active: activeConcurrent });
 
   try {
     const result = await withTimeout((async () => {
@@ -7674,7 +7688,7 @@ app.post('/api/roast-v3', async (req, res) => {
   if (rejected) return;
 
   acquireLock(clientKey);
-  console.log('[roast-v3] accepted', { clientKey, tier: req.body?.level || 'medium', active: activeConcurrent });
+  console.log('[roast-v3] accepted', { clientKey, keySource: getClientKeySource(req), tier: req.body?.level || 'medium', active: activeConcurrent });
 
   const t0 = Date.now();
   try {
@@ -8129,7 +8143,7 @@ app.post('/api/battle-v1', async (req, res) => {
   if (rejected) return;
 
   acquireLock(clientKey);
-  console.log('[battle-v1] accepted', { clientKey, tier: req.body?.level || 'medium', active: activeConcurrent });
+  console.log('[battle-v1] accepted', { clientKey, keySource: getClientKeySource(req), tier: req.body?.level || 'medium', active: activeConcurrent });
 
   const BATTLE_FALLBACK = {
     roastA: "Even the camera couldn't pick a side.",

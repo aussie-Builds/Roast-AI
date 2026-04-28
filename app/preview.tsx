@@ -230,11 +230,15 @@ export default function PreviewScreen() {
 
     try {
       const base64 = await getOptimizedBase64(uri);
+      const deviceId = await getDeviceId();
 
       const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, level, persona }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-device-id': deviceId,
+        },
+        body: JSON.stringify({ imageBase64: base64, level, persona, clientId: deviceId }),
       });
 
       const data = await response.json();
@@ -281,11 +285,15 @@ export default function PreviewScreen() {
 
     try {
       const base64 = await getOptimizedBase64(uri!);
+      const deviceId = await getDeviceId();
 
       const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, level: nextLevel, persona }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-device-id': deviceId,
+        },
+        body: JSON.stringify({ imageBase64: base64, level: nextLevel, persona, clientId: deviceId }),
       });
 
       const data = await response.json();
