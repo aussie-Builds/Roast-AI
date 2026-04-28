@@ -23,7 +23,7 @@ import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 
 import { API_BASE_URL } from '@/constants/api';
-import { canRoast, recordRoast } from '@/utils/rateLimiter';
+import { canBattle, recordBattle } from '@/utils/rateLimiter';
 import { track, getDeviceId } from '@/utils/analytics';
 import UpgradeModal from '@/components/UpgradeModal';
 
@@ -375,8 +375,9 @@ export default function BattleScreen() {
       return;
     }
 
-    const check = await canRoast(level);
+    const check = await canBattle(level);
     if (!check.allowed) {
+      track('battle_limit_reached', { level, persona });
       setUpgradeReason(check.reason ?? '');
       setUpgradeVisible(true);
       return;
@@ -420,7 +421,7 @@ export default function BattleScreen() {
       }
 
       setResult(data as BattleResult);
-      await recordRoast(level);
+      await recordBattle();
       track('battle_completed', { level, persona, winner: data.winner });
     } catch (err) {
       console.error('Battle error:', err);

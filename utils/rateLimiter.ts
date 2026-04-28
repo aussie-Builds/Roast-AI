@@ -11,7 +11,11 @@ type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 const KEYS = {
   premium: '@roast_premium',
   // Per-level keys generated dynamically: @roast_{level}_count, @roast_{level}_start
+  battleCount: '@battle_count',
+  battleStart: '@battle_start',
 };
+
+const DAILY_BATTLE_LIMIT = 1;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -75,6 +79,58 @@ export async function canRoast(
   }
 
   return { allowed: true };
+}
+
+// ── Battle limits ────────────────────────────────────────────────────
+
+export async function canBattle(
+  level: RoastLevel,
+): Promise<{ allowed: boolean; reason?: string }> {
+  if (CLOSED_TESTING_BUILD) return { allowed: true };
+  if (await getIsPremium()) return { allowed: true };
+
+  if (level === 'nuclear') {
+    return { allowed: false, reason: '☢️ Nuclear Battles are Premium\n\nUnlimited battles\nMaximum brutality' };
+  }
+
+  const [start, count] = await AsyncStorage.multiGet([KEYS.battleStart, KEYS.battleCount]);
+  const startVal = start[1];
+  const countVal = parseInt(count[1] ?? '0', 10);
+
+  if (startVal) {
+    const elapsed = Date.now() - new Date(startVal).getTime();
+    if (elapsed < DAY_MS) {
+      if (countVal >= DAILY_BATTLE_LIMIT) {
+        return {
+          allowed: false,
+          reason: 'You’ve used today’s free Battle.\n\nPremium unlocks unlimited Battles.',
+        };
+      }
+      return { allowed: true };
+    }
+  }
+
+  return { allowed: true };
+}
+
+export async function recordBattle(): Promise<void> {
+  if (CLOSED_TESTING_BUILD) return;
+  if (await getIsPremium()) return;
+
+  const existing = await AsyncStorage.getItem(KEYS.battleStart);
+  const withinWindow =
+    existing && Date.now() - new Date(existing).getTime() < DAY_MS;
+
+  if (withinWindow) {
+    const raw = await AsyncStorage.getItem(KEYS.battleCount);
+    const current = parseInt(raw ?? '0', 10);
+    await AsyncStorage.setItem(KEYS.battleCount, String(current + 1));
+  } else {
+    await AsyncStorage.multiSet([
+      [KEYS.battleStart, new Date().toISOString()],
+      [KEYS.battleCount, '1'],
+    ]);
+  }
 }
 
 export async function recordRoast(level: RoastLevel): Promise<void> {
