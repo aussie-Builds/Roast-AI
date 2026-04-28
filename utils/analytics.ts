@@ -45,7 +45,17 @@ export async function getDeviceId(): Promise<string> {
   return deviceId;
 }
 
-export function track(event: string, properties?: Record<string, string>) {
+type TrackProps = Record<string, string | number | boolean | undefined>;
+
+export function track(event: string, properties?: TrackProps) {
   const client = getClient();
-  client?.capture(event, properties);
+  if (!properties) {
+    client?.capture(event);
+    return;
+  }
+  const cleaned: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(properties)) {
+    if (v !== undefined) cleaned[k] = v;
+  }
+  client?.capture(event, cleaned);
 }

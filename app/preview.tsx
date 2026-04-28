@@ -22,7 +22,10 @@ import * as MediaLibrary from 'expo-media-library';
 import { API_BASE_URL } from '@/constants/api';
 import { canRoast, recordRoast } from '@/utils/rateLimiter';
 import { track, getDeviceId } from '@/utils/analytics';
+import { postJson } from '@/utils/api';
 import UpgradeModal from '@/components/UpgradeModal';
+
+type RoastResponse = { roasts?: string[] };
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
 type Persona = 'default' | 'butler' | 'mean_girl' | 'gym_bro' | 'anime_villain' | 'therapist';
@@ -220,6 +223,7 @@ export default function PreviewScreen() {
     // Rate limit check
     const check = await canRoast(level);
     if (!check.allowed) {
+      track('upgrade_modal_viewed', { source: 'roast', level, persona, reason: check.reason ?? '' });
       setUpgradeReason(check.reason ?? '');
       setUpgradeVisible(true);
       return;
@@ -232,36 +236,29 @@ export default function PreviewScreen() {
       const base64 = await getOptimizedBase64(uri);
       const deviceId = await getDeviceId();
 
-      const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-device-id': deviceId,
-        },
-        body: JSON.stringify({ imageBase64: base64, level, persona, clientId: deviceId }),
-      });
+      const result = await postJson<RoastResponse>(
+        `${API_BASE_URL}/api/roast-v3`,
+        { imageBase64: base64, level, persona, clientId: deviceId },
+        { deviceId },
+      );
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || data.error || 'Failed to generate roast');
+      if (!result.ok) {
+        if (__DEV__) console.warn('Roast error:', result.kind, result.status, result.message);
+        track('roast_failed', { level, persona, source, errorKind: result.kind, status: result.status });
+        setError(result.message);
+        return;
       }
 
-      if (!data.roasts || !Array.isArray(data.roasts)) {
-        throw new Error('Invalid response from server');
+      const roasts = result.data?.roasts;
+      if (!Array.isArray(roasts) || roasts.length === 0) {
+        track('roast_failed', { level, persona, source, errorKind: 'invalid' });
+        setError('Server response was invalid. Please try again.');
+        return;
       }
 
-      setRoasts(data.roasts);
+      setRoasts(roasts);
       await recordRoast(level);
-      track('roast_generated', { level, persona, source });
-    } catch (err) {
-      console.error('Roast error:', err);
-      track('roast_failed', { level, persona, source });
-      if (err instanceof TypeError && err.message.includes('Network request failed')) {
-        setError('Cannot connect to server. Make sure the backend is running.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
-      }
+      track('roast_generated', { level, persona, source, latencyMs: result.latencyMs });
     } finally {
       setIsLoading(false);
     }
@@ -274,6 +271,7 @@ export default function PreviewScreen() {
 
     const check = await canRoast(nextLevel);
     if (!check.allowed) {
+      track('upgrade_modal_viewed', { source: 'roast_harder', level: nextLevel, persona, reason: check.reason ?? '' });
       setUpgradeReason(check.reason ?? '');
       setUpgradeVisible(true);
       return;
@@ -287,36 +285,29 @@ export default function PreviewScreen() {
       const base64 = await getOptimizedBase64(uri!);
       const deviceId = await getDeviceId();
 
-      const response = await fetch(`${API_BASE_URL}/api/roast-v3`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-device-id': deviceId,
-        },
-        body: JSON.stringify({ imageBase64: base64, level: nextLevel, persona, clientId: deviceId }),
-      });
+      const result = await postJson<RoastResponse>(
+        `${API_BASE_URL}/api/roast-v3`,
+        { imageBase64: base64, level: nextLevel, persona, clientId: deviceId },
+        { deviceId },
+      );
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || data.error || 'Failed to generate roast');
+      if (!result.ok) {
+        if (__DEV__) console.warn('Roast error:', result.kind, result.status, result.message);
+        track('roast_failed', { level: nextLevel, persona, source, errorKind: result.kind, status: result.status });
+        setError(result.message);
+        return;
       }
 
-      if (!data.roasts || !Array.isArray(data.roasts)) {
-        throw new Error('Invalid response from server');
+      const roasts = result.data?.roasts;
+      if (!Array.isArray(roasts) || roasts.length === 0) {
+        track('roast_failed', { level: nextLevel, persona, source, errorKind: 'invalid' });
+        setError('Server response was invalid. Please try again.');
+        return;
       }
 
-      setRoasts(data.roasts);
+      setRoasts(roasts);
       await recordRoast(nextLevel);
-      track('roast_generated', { level: nextLevel, persona, source });
-    } catch (err) {
-      console.error('Roast error:', err);
-      track('roast_failed', { level: nextLevel, persona, source });
-      if (err instanceof TypeError && err.message.includes('Network request failed')) {
-        setError('Cannot connect to server. Make sure the backend is running.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
-      }
+      track('roast_generated', { level: nextLevel, persona, source, latencyMs: result.latencyMs });
     } finally {
       setIsLoading(false);
     }

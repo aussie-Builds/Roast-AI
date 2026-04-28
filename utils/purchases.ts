@@ -37,7 +37,10 @@ export async function initPurchases(): Promise<void> {
           // Acknowledge the purchase so Google doesn't refund it
           await finishTransaction({ purchase, isConsumable: false });
           await setIsPremium(true);
-          track('premium_activated', { source: 'purchase' });
+          track('purchase_completed', { sku: SUBSCRIPTION_ID });
+          // Backward-compat: keep firing the legacy event so existing PostHog
+          // dashboards/funnels keep working during open testing.
+          track('premium_activated', { source: 'purchase', sku: SUBSCRIPTION_ID });
         }
       },
     );

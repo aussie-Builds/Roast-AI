@@ -25,6 +25,7 @@ import * as MediaLibrary from 'expo-media-library';
 import { API_BASE_URL } from '@/constants/api';
 import { canBattle, recordBattle } from '@/utils/rateLimiter';
 import { track, getDeviceId } from '@/utils/analytics';
+import { postJson } from '@/utils/api';
 import UpgradeModal from '@/components/UpgradeModal';
 
 type RoastLevel = 'mild' | 'medium' | 'savage' | 'nuclear';
@@ -377,7 +378,8 @@ export default function BattleScreen() {
 
     const check = await canBattle(level);
     if (!check.allowed) {
-      track('battle_limit_reached', { level, persona });
+      track('battle_limit_reached', { level, persona, reason: check.reason ?? '' });
+      track('upgrade_modal_viewed', { source: 'battle', level, persona, reason: check.reason ?? '' });
       setUpgradeReason(check.reason ?? '');
       setUpgradeVisible(true);
       return;
@@ -395,41 +397,29 @@ export default function BattleScreen() {
         getDeviceId(),
       ]);
 
-      const response = await fetch(`${API_BASE_URL}/api/battle-v1`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-device-id': deviceId,
-        },
-        body: JSON.stringify({
-          imageBase64A: base64A,
-          imageBase64B: base64B,
-          level,
-          persona,
-          clientId: deviceId,
-        }),
-      });
+      const result = await postJson<BattleResult>(
+        `${API_BASE_URL}/api/battle-v1`,
+        { imageBase64A: base64A, imageBase64B: base64B, level, persona, clientId: deviceId },
+        { deviceId },
+      );
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || data.error || 'Battle failed');
+      if (!result.ok) {
+        if (__DEV__) console.warn('Battle error:', result.kind, result.status, result.message);
+        track('battle_failed', { level, persona, errorKind: result.kind, status: result.status });
+        setError(result.message);
+        return;
       }
 
-      if (!data.roastA || !data.roastB || !data.winner) {
-        throw new Error('Invalid battle response');
+      const data = result.data;
+      if (!data?.roastA || !data?.roastB || !data?.winner) {
+        track('battle_failed', { level, persona, errorKind: 'invalid' });
+        setError('Server response was invalid. Please try again.');
+        return;
       }
 
-      setResult(data as BattleResult);
+      setResult(data);
       await recordBattle();
-      track('battle_completed', { level, persona, winner: data.winner });
-    } catch (err) {
-      console.error('Battle error:', err);
-      if (err instanceof TypeError && err.message.includes('Network request failed')) {
-        setError('Cannot connect to server. Make sure the backend is running.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
-      }
+      track('battle_completed', { level, persona, winner: data.winner, latencyMs: result.latencyMs });
     } finally {
       setIsLoading(false);
     }
