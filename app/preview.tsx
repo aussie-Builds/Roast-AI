@@ -157,6 +157,7 @@ export default function PreviewScreen() {
   const [shareMode, setShareMode] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [upgradeReason, setUpgradeReason] = useState('');
+  const [upgradeSource, setUpgradeSource] = useState<'roast' | 'roast_harder'>('roast');
   const [deviceId, setDeviceId] = useState('');
   const animValue = useRef(new Animated.Value(0)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
@@ -225,6 +226,7 @@ export default function PreviewScreen() {
     if (!check.allowed) {
       track('upgrade_modal_viewed', { source: 'roast', level, persona, reason: check.reason ?? '' });
       setUpgradeReason(check.reason ?? '');
+      setUpgradeSource('roast');
       setUpgradeVisible(true);
       return;
     }
@@ -273,6 +275,7 @@ export default function PreviewScreen() {
     if (!check.allowed) {
       track('upgrade_modal_viewed', { source: 'roast_harder', level: nextLevel, persona, reason: check.reason ?? '' });
       setUpgradeReason(check.reason ?? '');
+      setUpgradeSource('roast_harder');
       setUpgradeVisible(true);
       return;
     }
@@ -577,6 +580,7 @@ export default function PreviewScreen() {
       <UpgradeModal
         visible={upgradeVisible}
         reason={upgradeReason}
+        source={upgradeSource}
         onClose={() => setUpgradeVisible(false)}
       />
     </View>

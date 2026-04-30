@@ -17,8 +17,14 @@ import { track } from './analytics';
 
 const SUBSCRIPTION_ID = 'roast_ai_premium';
 
+export type PurchaseSource = 'battle' | 'roast' | 'roast_harder' | 'general';
+
 let purchaseUpdateSub: ReturnType<typeof purchaseUpdatedListener> | null = null;
 let purchaseErrorSub: ReturnType<typeof purchaseErrorListener> | null = null;
+
+// Tracks the source of the most recent purchase attempt so the async
+// purchaseUpdatedListener can attribute purchase_completed / premium_activated.
+let lastPurchaseSource: PurchaseSource = 'general';
 
 /**
  * Initialize billing connection and set up purchase listeners.
@@ -37,10 +43,11 @@ export async function initPurchases(): Promise<void> {
           // Acknowledge the purchase so Google doesn't refund it
           await finishTransaction({ purchase, isConsumable: false });
           await setIsPremium(true);
-          track('purchase_completed', { sku: SUBSCRIPTION_ID });
+          const source = lastPurchaseSource;
+          track('purchase_completed', { sku: SUBSCRIPTION_ID, source });
           // Backward-compat: keep firing the legacy event so existing PostHog
           // dashboards/funnels keep working during open testing.
-          track('premium_activated', { source: 'purchase', sku: SUBSCRIPTION_ID });
+          track('premium_activated', { kind: 'purchase', sku: SUBSCRIPTION_ID, source });
         }
       },
     );
@@ -101,10 +108,11 @@ export async function getSubscriptionInfo(): Promise<ProductSubscription | null>
  * Fetches product details first to get the required offer token, then launches
  * the purchase sheet. The purchaseUpdatedListener handles the result.
  */
-export async function purchasePremium(): Promise<void> {
+export async function purchasePremium(source: PurchaseSource = 'general'): Promise<void> {
   if (Platform.OS !== 'android') return;
+  lastPurchaseSource = source;
   try {
-    track('purchase_started');
+    track('purchase_started', { source });
 
     const product = await getSubscriptionInfo();
     console.log('[IAP] Product fetch result:', product?.id ?? 'not found');

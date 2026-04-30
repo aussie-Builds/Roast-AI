@@ -804,6 +804,7 @@ export default function BattleScreen() {
       <UpgradeModal
         visible={upgradeVisible}
         reason={upgradeReason}
+        source="battle"
         onClose={() => setUpgradeVisible(false)}
       />
     </LinearGradient>

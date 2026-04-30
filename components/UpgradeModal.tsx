@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
-import { purchasePremium } from '@/utils/purchases';
+import { purchasePremium, type PurchaseSource } from '@/utils/purchases';
 import { track } from '@/utils/analytics';
 
 const BULLET_COLORS = ['#4DA6FF', '#FF9F0A', '#FF3B30'];
@@ -14,21 +14,23 @@ const PERKS = [
 interface UpgradeModalProps {
   visible: boolean;
   reason?: string;
+  source?: PurchaseSource;
   onClose: () => void;
 }
 
 export default function UpgradeModal({
   visible,
   reason,
+  source = 'general',
   onClose,
 }: UpgradeModalProps) {
   const [loading, setLoading] = useState(false);
 
   const handleUpgrade = async () => {
     setLoading(true);
-    track('upgrade_pressed');
+    track('upgrade_pressed', { source });
     try {
-      await purchasePremium();
+      await purchasePremium(source);
       // purchaseUpdatedListener in purchases.ts handles setIsPremium(true)
       // Close modal after purchase flow completes (success or cancel)
       onClose();
