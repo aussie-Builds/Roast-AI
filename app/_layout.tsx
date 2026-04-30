@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Pressable, Text } from 'react-native';
+import { LogBox, Pressable, Text } from 'react-native';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -8,6 +8,17 @@ import 'react-native-reanimated';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { track, identifyDevice } from '@/utils/analytics';
 import { initPurchases, restorePurchases, teardownPurchases } from '@/utils/purchases';
+
+// PostHog flushes events on a background timer; when the device is offline the
+// fetch rejects and the SDK logs a warning that surfaces as a red LogBox toast
+// in dev. Analytics still queues and retries — only the noisy log is hidden.
+if (__DEV__) {
+  LogBox.ignoreLogs([
+    /Error while flushing PostHog/,
+    /PostHogFetch/,
+    /PostHog.*[Nn]etwork/,
+  ]);
+}
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();

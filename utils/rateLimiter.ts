@@ -19,12 +19,14 @@ const DAILY_BATTLE_LIMIT = 1;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Daily limits per level for free users
+// Daily limits per level for free users.
+// Mild and Medium are unlimited during open testing; Savage is the only
+// counted tier; Nuclear is gated to Premium and never goes through the counter.
 const DAILY_LIMITS: Record<RoastLevel, number> = {
-  mild: 5,
-  medium: 3,
+  mild: Infinity,
+  medium: Infinity,
   savage: 1,
-  nuclear: 0, // locked for free users
+  nuclear: 0,
 };
 
 function levelKey(level: RoastLevel, suffix: 'count' | 'start'): string {
@@ -55,6 +57,9 @@ export async function canRoast(
     return { allowed: false, reason: '☢️ Nuclear roasts are Premium\n\nUnlimited roasts\nMaximum brutality' };
   }
 
+  // Mild and Medium are unlimited for free users.
+  if (level === 'mild' || level === 'medium') return { allowed: true };
+
   const limit = DAILY_LIMITS[level];
   const startKey = levelKey(level, 'start');
   const countKey = levelKey(level, 'count');
@@ -71,7 +76,7 @@ export async function canRoast(
         const hours = Math.ceil(remaining / (60 * 60 * 1000));
         return {
           allowed: false,
-          reason: `Daily limit reached. Upgrade to Premium for unlimited roasts.\n\nResets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
+          reason: `You’ve used today’s free Savage roast.\n\nPremium unlocks unlimited Savage and Nuclear.\n\nResets in ${hours} hour${hours !== 1 ? 's' : ''}.`,
         };
       }
       return { allowed: true };
@@ -136,6 +141,7 @@ export async function recordBattle(): Promise<void> {
 export async function recordRoast(level: RoastLevel): Promise<void> {
   if (CLOSED_TESTING_BUILD) return; // no counting during closed testing
   if (level === 'nuclear') return; // premium only, no counter needed
+  if (level === 'mild' || level === 'medium') return; // unlimited, not counted
 
   const startKey = levelKey(level, 'start');
   const countKey = levelKey(level, 'count');
