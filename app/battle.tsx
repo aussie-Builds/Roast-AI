@@ -72,6 +72,17 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PHOTO_SIZE = (SCREEN_WIDTH - 72) / 2; // 24px padding each side + 24px gap
 const RESULT_PHOTO_SIZE = (SCREEN_WIDTH - 48) / 2; // tighter gap, ~10% larger
 
+// Share/save export — winner is slightly larger, but both photos still read as
+// real competitors in the same matchup. The size hint pairs with the WINNER
+// badge and colored border to signal the winner without dominating.
+// Only applied while shareMode is true (during capture); live screen unchanged.
+const SHARE_PADDING = 16;
+const SHARE_GAP = 10;
+const SHARE_AVAIL_W = SCREEN_WIDTH - SHARE_PADDING * 2 - SHARE_GAP;
+const SHARE_WINNER_W = Math.round(SHARE_AVAIL_W * 0.55);
+const SHARE_LOSER_W = SHARE_AVAIL_W - SHARE_WINNER_W;
+const SHARE_PHOTO_H = Math.round(SHARE_WINNER_W * 1.22);
+
 type BattleResult = {
   roastA: string;
   roastB: string;
@@ -261,9 +272,10 @@ export default function BattleScreen() {
           bounciness: 6,
         }),
       ]),
-      // Loser: clearer dim + tiny scale-down for contrast.
+      // Loser: clearer dim + tiny scale-down for contrast. Held at 0.6 so it
+      // stays clearly secondary without looking muddy or dead.
       Animated.timing(loserOpacity, {
-        toValue: 0.5,
+        toValue: 0.6,
         duration: 280,
         useNativeDriver: true,
       }),
@@ -581,14 +593,17 @@ export default function BattleScreen() {
     const winnerRoast = winnerSide === 'A' ? result.roastA : result.roastB;
     const loserRoast = loserSide === 'A' ? result.roastA : result.roastB;
 
+    const winnerIsA = winnerSide === 'A';
+
     return (
       <ViewShot ref={viewShotRef} options={{ format: 'png', quality: 1 }}>
-        <View style={styles.resultContainer}>
-          {/* Photos — large, side by side */}
-          <View style={styles.resultPhotoRow}>
+        <View style={[styles.resultContainer, shareMode && styles.shareResultContainer]}>
+          {/* Photos — equal sizes live, asymmetric (winner dominant) during capture */}
+          <View style={[styles.resultPhotoRow, shareMode && styles.shareResultPhotoRow]}>
             <Animated.View style={[
               styles.resultPhotoWrap,
-              result.winner === 'A' && { borderColor: winnerColor, borderWidth: 3 },
+              shareMode && (winnerIsA ? styles.shareWinnerPhotoWrap : styles.shareLoserPhotoWrap),
+              result.winner === 'A' && { borderColor: winnerColor, borderWidth: 2 },
               { opacity: opacityA, transform: [{ scale: scaleA }] },
             ]}>
               <Image source={{ uri: uriA! }} style={styles.resultPhoto} contentFit="cover" />
@@ -610,7 +625,8 @@ export default function BattleScreen() {
 
             <Animated.View style={[
               styles.resultPhotoWrap,
-              result.winner === 'B' && { borderColor: winnerColor, borderWidth: 3 },
+              shareMode && (winnerIsA ? styles.shareLoserPhotoWrap : styles.shareWinnerPhotoWrap),
+              result.winner === 'B' && { borderColor: winnerColor, borderWidth: 2 },
               { opacity: opacityB, transform: [{ scale: scaleB }] },
             ]}>
               <Image source={{ uri: uriB! }} style={styles.resultPhoto} contentFit="cover" />
@@ -635,6 +651,7 @@ export default function BattleScreen() {
           <Animated.View
             style={[
               styles.verdictRow,
+              shareMode && styles.shareVerdictRow,
               {
                 opacity: verdictAnim,
                 transform: [{
@@ -644,7 +661,9 @@ export default function BattleScreen() {
             ]}
           >
             <View style={[styles.verdictAccent, { backgroundColor: winnerColor }]} />
-            <Text style={styles.verdictText}>{result.verdict}</Text>
+            <Text style={[styles.verdictText, shareMode && styles.shareVerdictText]}>
+              {result.verdict}
+            </Text>
           </Animated.View>
 
           {/* Winner roast — left accent border */}
@@ -652,6 +671,7 @@ export default function BattleScreen() {
             style={[
               styles.roastCard,
               styles.winnerRoastCard,
+              shareMode && styles.shareWinnerRoastCard,
               { borderLeftColor: winnerColor },
               {
                 opacity: winnerCardAnim,
@@ -664,34 +684,36 @@ export default function BattleScreen() {
             <Text style={styles.roastCardLabel}>
               {winnerSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
             </Text>
-            <Text style={styles.roastCardText}>
+            <Text style={[styles.roastCardText, shareMode && styles.shareWinnerRoastText]}>
               {winnerRoast}
             </Text>
           </Animated.View>
 
-          {/* Loser roast — neutral card */}
-          <Animated.View
-            style={[
-              styles.roastCard,
-              styles.loserRoastCard,
-              {
-                opacity: loserCardAnim,
-                transform: [{
-                  translateY: loserCardAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }),
-                }],
-              },
-            ]}
-          >
-            <Text style={[styles.roastCardLabel, styles.loserLabel]}>
-              {loserSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
-            </Text>
-            <Text style={[styles.roastCardText, styles.loserText]}>
-              {loserRoast}
-            </Text>
-          </Animated.View>
+          {/* Loser roast — hidden during capture so the export reads as a clean poster */}
+          {!shareMode && (
+            <Animated.View
+              style={[
+                styles.roastCard,
+                styles.loserRoastCard,
+                {
+                  opacity: loserCardAnim,
+                  transform: [{
+                    translateY: loserCardAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }),
+                  }],
+                },
+              ]}
+            >
+              <Text style={[styles.roastCardLabel, styles.loserLabel]}>
+                {loserSide === 'A' ? 'PHOTO A' : 'PHOTO B'}
+              </Text>
+              <Text style={[styles.roastCardText, styles.loserText]}>
+                {loserRoast}
+              </Text>
+            </Animated.View>
+          )}
 
           {/* Watermark */}
-          <View style={styles.watermark}>
+          <View style={[styles.watermark, shareMode && styles.shareWatermark]}>
             <View style={styles.watermarkRow}>
               <Text style={styles.watermarkBrand}>ROASTLAB</Text>
               <View style={styles.watermarkDot} />
@@ -1073,6 +1095,53 @@ const styles = StyleSheet.create({
   },
   loserText: {
     color: 'rgba(255,255,255,0.55)',
+  },
+
+  // ── Share/save export overrides ──
+  // Applied only while shareMode is true (during ViewShot capture). Reverts
+  // immediately after capture, so the live result screen is unaffected.
+  // Vertical rhythm: photos→verdict (20) sets verdict apart, verdict→winner
+  // (12) keeps them coupled, winner→pill (18 + 8) clearly demarcates the footer.
+  shareResultContainer: {
+    paddingHorizontal: SHARE_PADDING,
+    paddingTop: 18,
+    paddingBottom: 18,
+  },
+  shareResultPhotoRow: {
+    alignItems: 'flex-start',
+    gap: SHARE_GAP,
+    marginBottom: 20,
+  },
+  shareWinnerPhotoWrap: {
+    width: SHARE_WINNER_W,
+    height: SHARE_PHOTO_H,
+  },
+  shareLoserPhotoWrap: {
+    width: SHARE_LOSER_W,
+    height: SHARE_PHOTO_H,
+  },
+  shareVerdictRow: {
+    marginBottom: 12,
+    paddingHorizontal: 8,
+  },
+  shareVerdictText: {
+    fontSize: 22,
+    lineHeight: 28,
+    letterSpacing: 0.2,
+  },
+  shareWinnerRoastCard: {
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    marginBottom: 18,
+  },
+  shareWinnerRoastText: {
+    fontSize: 19,
+    lineHeight: 27,
+    fontWeight: '700',
+  },
+  shareWatermark: {
+    marginTop: 8,
+    paddingBottom: 0,
   },
 
   // Error
